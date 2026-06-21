@@ -441,7 +441,7 @@ class RewardManager:
         # Get oracle node texts
         oracle_texts = []
         for node_id in oracle_node_ids:
-            node = oracle_graph.get_node(node_id)
+            node = oracle_graph.get_node_or_none(node_id)
             if node:
                 oracle_texts.append(node.get("text", ""))
 
@@ -912,7 +912,7 @@ def classify_question_failure(
         oracle_node_ids = question.get("supporting_node_ids", [])
         has_abstract = False
         for node_id in oracle_node_ids:
-            node = oracle_graph.get_node(node_id)
+            node = oracle_graph.get_node_or_none(node_id)
             if node and node.get("type") in ["abstract_memory", "topic"]:
                 has_abstract = True
                 break

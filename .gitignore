@@ -1,1 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
 gaam_memory_training/data/
+.DS_Store
+CLAUDE.md
+Code-A1/
+design_docs/
+gaam_memory_training/*.md
+gaam_memory_training/outputs/
+gaam_memory_training/examples/
+gaam_memory_training/tests/

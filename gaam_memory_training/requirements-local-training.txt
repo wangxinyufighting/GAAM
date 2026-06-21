@@ -1,0 +1,12 @@
+# Optional dependencies for Phase 2 Milestone 4 local trainable model backend
+# Install with: pip install -r requirements-local-training.txt
+
+# Core dependencies
+torch>=2.0.0
+transformers>=4.51.0
+
+# Optional LoRA support
+peft>=0.4.0
+
+# Optional acceleration
+accelerate>=0.20.0

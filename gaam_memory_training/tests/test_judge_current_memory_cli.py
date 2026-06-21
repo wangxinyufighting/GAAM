@@ -5,6 +5,7 @@ Run with: pytest gaam_memory_training/tests/test_judge_current_memory_cli.py
 """
 
 import json
+import sys
 from pathlib import Path
 
 from gaam_graph.memory_schema import empty_current_memory
@@ -131,7 +132,7 @@ def test_cli_smoke(tmp_path):
 
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             "scripts/judge_current_memory.py",
             "--graph", str(graph_path),
             "--current_memory", str(memory_path),
@@ -176,7 +177,7 @@ def test_cli_rejects_graph_record_id_mismatch(tmp_path):
     builder_root = Path(__file__).parent.parent
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             "scripts/judge_current_memory.py",
             "--graph", str(graph_path),
             "--current_memory", str(memory_path),
@@ -206,7 +207,7 @@ def test_cli_rejects_extra_answer_ids(tmp_path):
     builder_root = Path(__file__).parent.parent
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             "scripts/judge_current_memory.py",
             "--graph", str(graph_path),
             "--current_memory", str(memory_path),
@@ -236,7 +237,7 @@ def test_cli_writes_weakness_updates_into_reward_report(tmp_path):
     builder_root = Path(__file__).parent.parent
     result = subprocess.run(
         [
-            "python",
+            sys.executable,
             "scripts/judge_current_memory.py",
             "--graph", str(graph_path),
             "--current_memory", str(memory_path),

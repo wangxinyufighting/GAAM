@@ -1,0 +1,13 @@
+[project]
+name = "gaam-graph-builder"
+version = "0.1.0"
+description = "GAAM oracle history graph builder for LongMemEval-style data"
+requires-python = ">=3.10"
+dependencies = [
+  "networkx>=3.2",
+  "pydantic>=2.6",
+  "python-dotenv>=1.0",
+  "openai>=1.0",
+  "tqdm>=4.66",
+  "orjson>=3.9"
+]
