@@ -51,7 +51,15 @@ INSTALL_DEPS="${INSTALL_DEPS:-0}"
 # the Code-A1/verl path.
 RUN_DRY_SMOKE="${RUN_DRY_SMOKE:-1}"
 
-CODE_A1_ROOT="${CODE_A1_ROOT:-${REPO_DIR}/Code-A1/Code-A1}"
+if [[ -z "${CODE_A1_ROOT:-}" ]]; then
+  if [[ -d "${REPO_DIR}/Code-A1/Code-A1" ]]; then
+    CODE_A1_ROOT="${REPO_DIR}/Code-A1/Code-A1"
+  elif [[ -d "${ROOT_DIR}/Code-A1/Code-A1" ]]; then
+    CODE_A1_ROOT="${ROOT_DIR}/Code-A1/Code-A1"
+  else
+    CODE_A1_ROOT="${REPO_DIR}/Code-A1/Code-A1"
+  fi
+fi
 VERL_ROOT="${VERL_ROOT:-${CODE_A1_ROOT}/verl}"
 
 # OpenMP guards for CI, containers, and restricted /dev/shm environments.
@@ -60,7 +68,7 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
 export KMP_INIT_AT_FORK="${KMP_INIT_AT_FORK:-FALSE}"
 
-export PYTHONPATH="${ROOT_DIR}:${VERL_ROOT}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}:${CODE_A1_ROOT}:${VERL_ROOT}:${PYTHONPATH:-}"
 
 echo "== GAAM Phase 3 Code-A1/verl training script =="
 echo "ROOT_DIR=${ROOT_DIR}"
@@ -85,6 +93,51 @@ require_dir() {
   fi
 }
 
+install_vendored_verl_requirements() {
+  local requirements_file="$1"
+  local filtered_requirements
+  local flash_attn_requirements
+
+  filtered_requirements="$(mktemp)"
+  flash_attn_requirements="$(mktemp)"
+  trap 'rm -f "${filtered_requirements}" "${flash_attn_requirements}"' RETURN
+
+  "${PYTHON_BIN}" - "${requirements_file}" "${filtered_requirements}" "${flash_attn_requirements}" <<'PY'
+import pathlib
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+flash_dst = pathlib.Path(sys.argv[3])
+
+kept = []
+flash_attn_specs = []
+for raw_line in src.read_text(encoding="utf-8").splitlines():
+    stripped = raw_line.strip()
+    normalized = stripped.split("#", 1)[0].strip().lower().replace("_", "-")
+    if normalized == "flash-attn" or normalized.startswith("flash-attn==") or normalized.startswith("flash-attn>") or normalized.startswith("flash-attn<"):
+        flash_attn_specs.append(stripped)
+    else:
+        kept.append(raw_line)
+
+dst.write_text("\n".join(kept) + "\n", encoding="utf-8")
+flash_dst.write_text("\n".join(flash_attn_specs) + ("\n" if flash_attn_specs else ""), encoding="utf-8")
+PY
+
+  echo "== Installing vendored verl dependencies except flash-attn =="
+  "${PYTHON_BIN}" -m pip install -r "${filtered_requirements}"
+
+  if [[ -s "${flash_attn_requirements}" ]]; then
+    echo "== Installing flash-attn with --no-build-isolation =="
+    "${PYTHON_BIN}" - <<'PY'
+import torch
+
+print("torch_available_for_flash_attn_build:", torch.__version__, "cuda", torch.version.cuda)
+PY
+    "${PYTHON_BIN}" -m pip install -r "${flash_attn_requirements}" --no-build-isolation
+  fi
+}
+
 require_file "${INPUT_PATH}"
 require_dir "${ORACLE_GRAPH_DIR}"
 require_file "${ORACLE_GRAPH_DIR}/${RECORD_ID}.graph.json"
@@ -101,15 +154,15 @@ if [[ "${INSTALL_DEPS}" == "1" ]]; then
 
   if [[ -f "${VERL_ROOT}/requirements.txt" ]]; then
     echo "== Installing vendored verl dependencies =="
-    "${PYTHON_BIN}" -m pip install -r "${VERL_ROOT}/requirements.txt"
+    install_vendored_verl_requirements "${VERL_ROOT}/requirements.txt"
   fi
 fi
 
 echo "== Python / CUDA / verl check =="
 "${PYTHON_BIN}" - <<'PY'
-import importlib.util
 import os
 import sys
+import traceback
 
 print("python:", sys.version.replace("\n", " "))
 print("PYTHONPATH:", os.environ.get("PYTHONPATH", ""))
@@ -124,11 +177,17 @@ try:
 except Exception as exc:
     print("torch_check_failed:", repr(exc))
 
-spec = importlib.util.find_spec("verl")
-print("verl_importable:", spec is not None)
-if spec is None:
+try:
+    import verl
+    print("verl_package:", getattr(verl, "__file__", "<unknown>"))
+    from verl import protocol
+    print("verl_protocol:", getattr(protocol, "__file__", "<unknown>"))
+except Exception:
+    print("verl_protocol_import_failed:")
+    traceback.print_exc()
     raise SystemExit(
-        "verl is not importable. Check CODE_A1_ROOT/VERL_ROOT and PYTHONPATH."
+        "verl.protocol is not importable. Install vendored verl dependencies "
+        "or set CODE_A1_ROOT/VERL_ROOT/PYTHONPATH correctly."
     )
 PY
 
@@ -180,4 +239,3 @@ echo "== Inspecting Code-A1/verl run =="
 echo "== Done =="
 echo "Dry-run output: ${DRY_RUN_OUTPUT_DIR}"
 echo "Code-A1/verl output: ${VERL_OUTPUT_DIR}"
-

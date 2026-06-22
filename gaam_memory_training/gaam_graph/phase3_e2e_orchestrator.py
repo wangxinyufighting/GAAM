@@ -66,6 +66,8 @@ def _find_code_a1_root() -> Path | None:
     candidates = [
         Path("Code-A1/Code-A1"),
         Path("../Code-A1/Code-A1"),
+        Path("gaam_memory_training/Code-A1/Code-A1"),
+        Path(__file__).resolve().parents[1] / "Code-A1" / "Code-A1",
         Path(__file__).resolve().parents[2] / "Code-A1" / "Code-A1",
     ]
     for candidate in candidates:
@@ -338,8 +340,8 @@ def _assess_code_a1_verl_readiness(config: Phase3E2ERunConfig) -> tuple[bool, li
         gaps.append("code_a1_path_missing")
     try:
         from verl import protocol  # noqa: F401
-    except ImportError:
-        gaps.append("vendored_verl_not_importable")
+    except Exception as exc:
+        gaps.append(f"vendored_verl_not_importable:{type(exc).__name__}:{exc}")
     if not config.write_verl_dataproto:
         gaps.append("write_verl_dataproto_not_requested")
     return not gaps, gaps
@@ -476,13 +478,18 @@ def run_preflight(config: Phase3E2ERunConfig) -> Phase3E2EStageReport:
             from verl import protocol  # noqa: F401
 
             metrics["vendored_verl_available"] = True
-        except ImportError:
+        except Exception as e:
             metrics["vendored_verl_available"] = False
+            metrics["vendored_verl_import_error"] = f"{type(e).__name__}: {e}"
             if config.backend in [Phase3E2EBackend.VENDORED_VERL, Phase3E2EBackend.CODE_A1_VERL]:
                 if config.strict:
-                    errors.append("Vendored verl requested but not available")
+                    errors.append(
+                        f"Vendored verl requested but not available: {type(e).__name__}: {e}"
+                    )
                 else:
-                    warnings.append("Vendored verl not available (will use fallback)")
+                    warnings.append(
+                        f"Vendored verl not available (will use fallback): {type(e).__name__}: {e}"
+                    )
 
         # Check Code-A1 path for Code-A1/verl-oriented runs
         code_a1_path = _find_code_a1_root()
