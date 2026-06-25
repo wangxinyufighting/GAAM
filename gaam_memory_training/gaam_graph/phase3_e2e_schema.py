@@ -90,6 +90,8 @@ class Phase3E2ERunConfig(BaseModel):
     memory_builder_model_path: str | None = None
     question_agent_model_path: str | None = None
     answerer_model_path: str | None = None
+    memory_builder_checkpoint_id: str | None = None
+    question_agent_checkpoint_id: str | None = None
     checkpoint_registry_path: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
