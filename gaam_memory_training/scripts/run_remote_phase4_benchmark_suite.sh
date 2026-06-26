@@ -55,7 +55,8 @@ ORACLE_GRAPH_DIR="${ORACLE_GRAPH_DIR:-outputs/longmemeval_s_graph}"
 RECORD_ID="${RECORD_ID:-e47becba}"
 DEBUG_SPLIT_PATH="${DEBUG_SPLIT_PATH:-outputs/splits/${RECORD_ID}.debug.json}"
 
-SUITE_CONFIG="${SUITE_CONFIG:-configs/phase4/debug_smoke_suite.json}"
+DEFAULT_SUITE_CONFIG="configs/phase4/debug_smoke_suite.json"
+SUITE_CONFIG="${SUITE_CONFIG:-${DEFAULT_SUITE_CONFIG}}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/phase4_benchmark_suites/debug_smoke}"
 TRAINER_BACKEND="${TRAINER_BACKEND:-dry_run}"
 SEEDS="${SEEDS:-0}"
@@ -68,8 +69,23 @@ ANSWERER_MODEL_PATH="${ANSWERER_MODEL_PATH:-}"
 # mutate a managed environment unexpectedly.
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
 
-# Debug split preparation is useful for the default e47becba smoke suite.
-PREPARE_DEBUG_SPLIT="${PREPARE_DEBUG_SPLIT:-1}"
+# Debug split preparation is useful only for the default e47becba smoke suite.
+if [[ -z "${PREPARE_DEBUG_SPLIT:-}" ]]; then
+  if [[ "${SUITE_CONFIG}" == "${DEFAULT_SUITE_CONFIG}" ]]; then
+    PREPARE_DEBUG_SPLIT="1"
+  else
+    PREPARE_DEBUG_SPLIT="0"
+  fi
+fi
+
+# Full split preparation is useful when ORACLE_GRAPH_DIR contains a subset of
+# prebuilt oracle graphs and you want the suite to use only those record IDs.
+PREPARE_FULL_SPLIT="${PREPARE_FULL_SPLIT:-0}"
+FULL_SPLIT_PATH="${FULL_SPLIT_PATH:-outputs/splits/longmemeval_s.phase4_split.seed0.json}"
+SPLIT_SEED="${SPLIT_SEED:-0}"
+TRAIN_RATIO="${TRAIN_RATIO:-0.8}"
+DEV_RATIO="${DEV_RATIO:-0.1}"
+TEST_RATIO="${TEST_RATIO:-0.1}"
 
 # Use OVERWRITE=1 for a fresh run, or OVERWRITE=0 to resume.
 OVERWRITE="${OVERWRITE:-1}"
@@ -194,6 +210,8 @@ echo "SUITE_CONFIG=${SUITE_CONFIG}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "TRAINER_BACKEND=${TRAINER_BACKEND}"
 echo "SEEDS=${SEEDS}"
+echo "PREPARE_DEBUG_SPLIT=${PREPARE_DEBUG_SPLIT}"
+echo "PREPARE_FULL_SPLIT=${PREPARE_FULL_SPLIT}"
 
 require_file "${INPUT_PATH}"
 require_dir "${ORACLE_GRAPH_DIR}"
@@ -260,6 +278,34 @@ if [[ "${PREPARE_DEBUG_SPLIT}" == "1" ]]; then
     --debug_single_case \
     --allow_empty_split \
     --overwrite
+fi
+
+if [[ "${PREPARE_FULL_SPLIT}" == "1" ]]; then
+  echo "== Preparing full split from oracle graphs =="
+  mapfile -t GRAPH_RECORD_IDS < <(
+    find "${ORACLE_GRAPH_DIR}" -maxdepth 1 -type f -name '*.graph.json' \
+      -exec basename {} .graph.json \; | sort
+  )
+  if [[ "${#GRAPH_RECORD_IDS[@]}" -lt 3 ]]; then
+    echo "Need at least 3 oracle graphs for train/dev/test split, found ${#GRAPH_RECORD_IDS[@]}." >&2
+    exit 1
+  fi
+
+  SPLIT_ARGS=(
+    scripts/create_dataset_split.py
+    --input "${INPUT_PATH}"
+    --oracle_graph_dir "${ORACLE_GRAPH_DIR}"
+    --output "${FULL_SPLIT_PATH}"
+    --train_ratio "${TRAIN_RATIO}"
+    --dev_ratio "${DEV_RATIO}"
+    --test_ratio "${TEST_RATIO}"
+    --seed "${SPLIT_SEED}"
+    --overwrite
+  )
+  for rid in "${GRAPH_RECORD_IDS[@]}"; do
+    SPLIT_ARGS+=(--record_id "${rid}")
+  done
+  "${PYTHON_BIN}" "${SPLIT_ARGS[@]}"
 fi
 
 read -r -a SEED_ARGS <<< "${SEEDS}"
