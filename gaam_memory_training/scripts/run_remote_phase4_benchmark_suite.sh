@@ -10,12 +10,17 @@ set -euo pipefail
 #   Set TRAINER_BACKEND=verl and provide model paths. For a real benchmark,
 #   also provide SUITE_CONFIG pointing to a multi-case train/dev/test suite.
 #
-# Example:
+# Examples:
+#   # 1) Real e47becba smoke test, no custom suite config required:
+#   bash scripts/run_remote_phase4_benchmark_suite.sh
+#
+#   # 2) Real full benchmark after you have created a real split manifest and
+#   # copied configs/phase4/full_verl_suite.template.json to your own config:
 #   MEMORY_MODEL_PATH=/mnt/local2/wxy/models/Qwen3-0.6B \
 #   QUESTION_MODEL_PATH=/mnt/local2/wxy/models/Qwen3-0.6B \
 #   ANSWERER_MODEL_PATH=/mnt/local2/wxy/models/Qwen3-0.6B \
 #   TRAINER_BACKEND=verl \
-#   SUITE_CONFIG=configs/phase4/my_full_suite.json \
+#   SUITE_CONFIG=configs/phase4/full_verl_suite.json \
 #   OUTPUT_DIR=outputs/phase4_benchmark_suites/full_verl \
 #   SEEDS="0 1 2" \
 #   bash scripts/run_remote_phase4_benchmark_suite.sh
