@@ -1,6 +1,12 @@
+# Core runtime dependencies for GAAM graph building, memory construction,
+# reward evaluation, and Phase 4 dry-run benchmark orchestration.
+#
+# Python: >=3.10 is required by the codebase.
+
 networkx>=3.2
 pydantic>=2.6
 python-dotenv>=1.0
 openai>=1.0
 tqdm>=4.66
 orjson>=3.9
+PyYAML>=6.0

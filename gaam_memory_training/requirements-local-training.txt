@@ -1,8 +1,14 @@
-# Optional dependencies for Phase 2 Milestone 4 local trainable model backend
+# Optional dependencies for local/GPU trainable model backends.
 # Install with: pip install -r requirements-local-training.txt
+#
+# Notes:
+# - Install a PyTorch CUDA build that matches the server driver before running
+#   real GPU training, for example from https://pytorch.org/get-started/locally/.
+# - The Code-A1/verl backend is vendored under Code-A1/Code-A1 and is added to
+#   PYTHONPATH by the remote scripts; do not install a random PyPI "verl" here.
 
-# Core dependencies
-torch>=2.0.0
+# Core model dependencies
+torch>=2.5.0
 transformers>=4.51.0
 
 # Optional LoRA support
@@ -10,3 +16,6 @@ peft>=0.4.0
 
 # Optional acceleration
 accelerate>=0.20.0
+
+# Optional distributed rollout/runtime support
+ray>=2.9

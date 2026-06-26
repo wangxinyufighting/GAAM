@@ -1,0 +1,5 @@
+# Development and verification dependencies.
+# Install after runtime dependencies:
+#   pip install -r requirements.txt -r requirements-local-training.txt -r requirements-dev.txt
+
+pytest>=8.0
