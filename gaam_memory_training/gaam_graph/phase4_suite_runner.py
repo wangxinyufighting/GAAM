@@ -140,11 +140,25 @@ def run_seed_experiment(
             allow_empty_batch=suite_config.allow_empty_batch,
         )
         cotraining_manifest = run_phase4_cotraining_loop(cotraining_config)
+        cotraining_errors = [
+            f"round_{round_report.round_id}: {error}"
+            for round_report in cotraining_manifest.round_reports
+            for error in round_report.errors
+        ]
+        cotraining_warnings = [
+            f"round_{round_report.round_id}: {warning}"
+            for round_report in cotraining_manifest.round_reports
+            for warning in round_report.warnings
+        ]
 
         experiment_manifest.cotraining_dir = str(cotraining_dir)
         experiment_manifest.cotraining_manifest_path = str(
             cotraining_dir / "cotraining_manifest.json"
         )
+        if cotraining_manifest.status == Phase4RoundStatus.FAILED:
+            experiment_manifest.errors.append("Co-training loop failed.")
+        experiment_manifest.errors.extend(cotraining_errors)
+        experiment_manifest.warnings.extend(cotraining_warnings)
 
         final_round = (
             cotraining_manifest.round_reports[-1]
@@ -267,6 +281,8 @@ def run_seed_experiment(
                 else None
             ),
             metrics=metrics,
+            warnings=experiment_manifest.warnings,
+            errors=experiment_manifest.errors,
         )
 
     except Exception as exc:

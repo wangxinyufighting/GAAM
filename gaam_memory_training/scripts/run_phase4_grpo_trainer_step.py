@@ -108,9 +108,21 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--memory_builder_checkpoint_path",
+        type=str,
+        help="Memory Builder checkpoint directory to load",
+    )
+
+    parser.add_argument(
         "--question_agent_checkpoint_id",
         type=str,
         help="Question Agent checkpoint ID to load",
+    )
+
+    parser.add_argument(
+        "--question_agent_checkpoint_path",
+        type=str,
+        help="Question Agent checkpoint directory to load",
     )
 
     parser.add_argument(
@@ -235,6 +247,8 @@ def main() -> int:
         question_agent_model_path=args.question_agent_model_path,
         memory_builder_checkpoint_id=args.memory_builder_checkpoint_id,
         question_agent_checkpoint_id=args.question_agent_checkpoint_id,
+        memory_builder_checkpoint_path=args.memory_builder_checkpoint_path,
+        question_agent_checkpoint_path=args.question_agent_checkpoint_path,
         checkpoint_registry_path=args.checkpoint_registry_path,
         learning_rate=args.learning_rate,
         max_grad_norm=args.max_grad_norm,

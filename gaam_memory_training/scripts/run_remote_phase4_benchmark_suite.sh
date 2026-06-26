@@ -110,6 +110,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
 export KMP_INIT_AT_FORK="${KMP_INIT_AT_FORK:-FALSE}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 if [[ "${TRAINER_BACKEND}" == "verl" ]]; then
   export PYTHONPATH="${ROOT_DIR}:${CODE_A1_ROOT}:${VERL_ROOT}:${PYTHONPATH:-}"
@@ -343,7 +344,47 @@ echo "== Checking Phase 4 backend readiness =="
 "${PYTHON_BIN}" scripts/check_phase4_backend_readiness.py "${READINESS_ARGS[@]}"
 
 echo "== Running Phase 4 benchmark suite =="
+set +e
 "${PYTHON_BIN}" scripts/run_phase4_benchmark_suite.py "${RUN_ARGS[@]}"
+SUITE_EXIT_CODE=$?
+set -e
+
+if [[ "${SUITE_EXIT_CODE}" -ne 0 ]]; then
+  echo "== Phase 4 benchmark suite failed =="
+  if [[ -f "${OUTPUT_DIR}/suite_manifest.json" ]]; then
+    "${PYTHON_BIN}" - "${OUTPUT_DIR}/suite_manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+print(f"Suite status: {manifest.get('status')}")
+print(f"Manifest: {manifest_path}")
+print("")
+for run in manifest.get("run_records", []):
+    print(f"seed={run.get('seed')} status={run.get('status')}")
+    errors = run.get("errors") or []
+    warnings = run.get("warnings") or []
+    experiment_manifest_path = run.get("experiment_manifest_path")
+    if errors:
+        print("  errors:")
+        for error in errors:
+            print(f"    - {error}")
+    if warnings:
+        print("  warnings:")
+        for warning in warnings:
+            print(f"    - {warning}")
+    if experiment_manifest_path:
+        print(f"  experiment_manifest: {experiment_manifest_path}")
+    print(f"  output_dir: {run.get('output_dir')}")
+    print("")
+PY
+  else
+    echo "Suite manifest was not written: ${OUTPUT_DIR}/suite_manifest.json" >&2
+  fi
+  exit "${SUITE_EXIT_CODE}"
+fi
 
 if [[ "${RUN_AGGREGATE}" == "1" ]]; then
   echo "== Aggregating Phase 4 benchmark suite =="

@@ -392,11 +392,17 @@ def run_multi_case_rollout(
     records_dir = output_dir / "records"
     records_dir.mkdir(parents=True, exist_ok=True)
 
-    for record_id in selected_record_ids:
+    total_selected = len(selected_record_ids)
+    for record_index, record_id in enumerate(selected_record_ids, start=1):
         # Check if already succeeded (resume mode)
         if resume and record_id in existing_records:
             existing_run = existing_records[record_id]
             if existing_run.status == MultiCaseRolloutStatus.SUCCEEDED:
+                print(
+                    f"[Multi-case rollout] {split.value} {record_index}/{total_selected} "
+                    f"{record_id}: skipped existing succeeded run",
+                    flush=True,
+                )
                 manifest.records.append(existing_run)
                 continue
 
@@ -418,8 +424,17 @@ def run_multi_case_rollout(
             **kwargs,
         )
 
-        # Run record
+        print(
+            f"[Multi-case rollout] {split.value} {record_index}/{total_selected} "
+            f"{record_id}: starting",
+            flush=True,
+        )
         record_run = run_record_rollout(record_id, config, record_output_dir)
+        print(
+            f"[Multi-case rollout] {split.value} {record_index}/{total_selected} "
+            f"{record_id}: {record_run.status.value}",
+            flush=True,
+        )
         manifest.records.append(record_run)
 
         # Update manifest after each record

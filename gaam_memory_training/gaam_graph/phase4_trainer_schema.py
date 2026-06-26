@@ -52,6 +52,8 @@ class Phase4TrainerStepConfig(BaseModel):
     question_agent_model_path: str | None = None
     memory_builder_checkpoint_id: str | None = None
     question_agent_checkpoint_id: str | None = None
+    memory_builder_checkpoint_path: str | None = None
+    question_agent_checkpoint_path: str | None = None
     checkpoint_registry_path: str | None = None
     learning_rate: float = 1e-6
     max_grad_norm: float = 1.0
@@ -104,6 +106,8 @@ class Phase4ActorTrainerReport(BaseModel):
     written_checkpoint_path: str | None = None
     trainer_ready_batch_path: str | None = None
     tensor_payload_path: str | None = None
+    weights_written: bool = False
+    handoff_only: bool = False
     num_input_samples: int = 0
     num_selected_samples: int = 0
     reward_mean: float | None = None

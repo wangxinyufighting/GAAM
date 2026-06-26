@@ -12,6 +12,7 @@ Deterministic scheduling from seed. Same seed + same split -> same schedule.
 """
 
 import random
+import json
 from pathlib import Path
 
 from gaam_graph.dataset_split_schema import DatasetSplitManifest, DatasetSplitName
@@ -20,6 +21,33 @@ from gaam_graph.phase4_cotraining_schema import (
     Phase4RoundPlan,
     Phase4RoundReport,
 )
+
+
+def _resolve_checkpoint_path_from_registry(
+    registry_path: str | None,
+    checkpoint_id: str | None,
+) -> str | None:
+    """Resolve a checkpoint id to its checkpoint directory from a Phase 4 registry."""
+    if not registry_path or not checkpoint_id:
+        return None
+
+    path = Path(registry_path)
+    if not path.exists():
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    for checkpoint in data.get("checkpoints", []):
+        if checkpoint.get("checkpoint_id") != checkpoint_id:
+            continue
+        checkpoint_path = checkpoint.get("checkpoint_path")
+        if checkpoint_path:
+            return str(checkpoint_path)
+
+    return None
 
 
 def select_round_records(
@@ -141,6 +169,8 @@ def build_round_plan(
     # Determine checkpoint IDs for this round
     memory_builder_checkpoint_id: str | None = None
     question_agent_checkpoint_id: str | None = None
+    memory_builder_checkpoint_path: str | None = None
+    question_agent_checkpoint_path: str | None = None
     checkpoint_registry_path: str | None = None
 
     if previous_round is not None:
@@ -159,11 +189,27 @@ def build_round_plan(
             if previous_round.metrics
             else None
         )
+        memory_builder_checkpoint_path = _resolve_checkpoint_path_from_registry(
+            checkpoint_registry_path,
+            memory_builder_checkpoint_id,
+        )
+        question_agent_checkpoint_path = _resolve_checkpoint_path_from_registry(
+            checkpoint_registry_path,
+            question_agent_checkpoint_id,
+        )
     else:
         # Round 0: use initial checkpoints from config
         memory_builder_checkpoint_id = config.initial_memory_builder_checkpoint_id
         question_agent_checkpoint_id = config.initial_question_agent_checkpoint_id
         checkpoint_registry_path = config.checkpoint_registry_path
+        memory_builder_checkpoint_path = _resolve_checkpoint_path_from_registry(
+            checkpoint_registry_path,
+            memory_builder_checkpoint_id,
+        )
+        question_agent_checkpoint_path = _resolve_checkpoint_path_from_registry(
+            checkpoint_registry_path,
+            question_agent_checkpoint_id,
+        )
 
     # Output directory
     output_dir = str(Path(config.output_dir) / "rounds" / f"round_{round_id:03d}")
@@ -174,6 +220,8 @@ def build_round_plan(
         dev_record_ids=dev_record_ids,
         memory_builder_checkpoint_id=memory_builder_checkpoint_id,
         question_agent_checkpoint_id=question_agent_checkpoint_id,
+        memory_builder_checkpoint_path=memory_builder_checkpoint_path,
+        question_agent_checkpoint_path=question_agent_checkpoint_path,
         checkpoint_registry_path=checkpoint_registry_path,
         output_dir=output_dir,
         seed=config.seed,

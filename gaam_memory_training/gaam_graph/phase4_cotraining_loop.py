@@ -278,6 +278,8 @@ def run_phase4_cotraining_round(
             question_agent_model_path=config.question_agent_model_path,
             memory_builder_checkpoint_id=round_plan.memory_builder_checkpoint_id,
             question_agent_checkpoint_id=round_plan.question_agent_checkpoint_id,
+            memory_builder_checkpoint_path=round_plan.memory_builder_checkpoint_path,
+            question_agent_checkpoint_path=round_plan.question_agent_checkpoint_path,
             checkpoint_registry_path=str(
                 trainer_step_dir / "checkpoint_registry.json"
             ),

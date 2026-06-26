@@ -34,7 +34,11 @@ from gaam_graph.phase4_trainer_schema import (
     generate_trainer_step_run_id,
     sanitize_metrics,
 )
-from gaam_graph.grpo_schema import ActorRole
+from gaam_graph.grpo_schema import ActorRole, ActorUpdateBatch
+from gaam_graph.local_dataproto_adapter import (
+    _tensor_bundle_to_torch_payload,
+    actor_update_batch_to_local_dataproto,
+)
 
 
 def _numeric_values(values: list[Any]) -> list[float]:
@@ -74,8 +78,8 @@ def _write_checkpoint_registry(
             "step_id": manifest.step_id,
             "checkpoint_path": report.written_checkpoint_path,
             "source_batch_path": report.input_batch_path,
-            "updated": report.backend != Phase4TrainerBackend.DRY_RUN
-            and report.status == "succeeded",
+            "updated": report.weights_written,
+            "handoff_only": report.handoff_only,
             "metrics": {
                 "reward_mean": report.reward_mean,
                 "loss": report.loss,
@@ -84,7 +88,9 @@ def _write_checkpoint_registry(
             },
         }
         checkpoints.append(checkpoint)
-        if report.status == "succeeded":
+        if report.status == "succeeded" and (
+            report.weights_written or report.backend == Phase4TrainerBackend.DRY_RUN
+        ):
             latest_by_actor[report.actor_role.value] = report.written_checkpoint_id
 
     registry = {
@@ -99,6 +105,342 @@ def _write_checkpoint_registry(
         json.dump(registry, f, indent=2)
 
     return registry_path
+
+
+def _load_actor_tokenizer_for_handoff(
+    actor_role: ActorRole,
+    config: Phase4TrainerStepConfig,
+    report: Phase4ActorTrainerReport,
+) -> Any | None:
+    """Load the actor tokenizer for VERL handoff, falling back to local deterministic tokenization."""
+    model_path = (
+        config.memory_builder_model_path
+        if actor_role == ActorRole.MEMORY_BUILDER
+        else config.question_agent_model_path
+    )
+    if not model_path:
+        report.warnings.append(
+            f"No model path configured for {actor_role.value}; using fallback tokenizer for handoff."
+        )
+        return None
+
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    except Exception as exc:
+        report.warnings.append(
+            f"Failed to load tokenizer from {model_path}; using fallback tokenizer: {type(exc).__name__}: {exc}"
+        )
+        return None
+
+
+def _write_phase4_verl_handoff(
+    *,
+    actor_role: ActorRole,
+    config: Phase4TrainerStepConfig,
+    raw_batch: dict[str, Any],
+    source_batch_path: Path,
+    output_dir: Path,
+    report: Phase4ActorTrainerReport,
+) -> None:
+    """
+    Convert an aggregated ActorUpdateBatch into trainer-ready VERL artifacts.
+
+    This is a real handoff boundary: it validates the sanitized actor batch,
+    tensorizes it, enriches trainer fields, and optionally materializes a vendored
+    VERL DataProto. It does not perform a distributed weight update inside this
+    process.
+    """
+    import torch
+    from gaam_graph.verl_trainer_adapter import (
+        VerlTrainerAdapterMode,
+        build_trainer_ready_batch,
+        trainer_bundle_to_verl_dataproto,
+    )
+
+    actor_batch = ActorUpdateBatch.model_validate(raw_batch)
+    if actor_batch.role != actor_role:
+        raise ValueError(
+            f"Batch role mismatch: expected {actor_role.value}, got {actor_batch.role.value}"
+        )
+
+    tokenizer = _load_actor_tokenizer_for_handoff(actor_role, config, report)
+    local_batch, local_tensor_bundle = actor_update_batch_to_local_dataproto(
+        actor_batch,
+        tokenizer=tokenizer,
+        include_unselected=False,
+        max_prompt_length=None,
+        max_response_length=None,
+        truncation="error",
+    )
+    if not local_batch.samples:
+        raise ValueError(f"VERL handoff received zero selected samples for {actor_role.value}")
+
+    handoff_dir = output_dir / "verl_handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+
+    local_dataproto_path = handoff_dir / f"{actor_role.value}.local_dataproto.json"
+    with open(local_dataproto_path, "w", encoding="utf-8") as f:
+        json.dump(local_batch.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+
+    tensor_payload = _tensor_bundle_to_torch_payload(local_tensor_bundle, torch)
+    local_tensor_path = handoff_dir / f"{actor_role.value}.local_dataproto.pt"
+    torch.save(tensor_payload, local_tensor_path)
+
+    trainer_ready_batch, trainer_bundle = build_trainer_ready_batch(
+        local_batch=local_batch,
+        tensor_payload=tensor_payload,
+        mode=VerlTrainerAdapterMode.VENDORED_VERL,
+        allow_stub_logprobs=True,
+        returns_strategy="advantages_as_returns",
+    )
+
+    trainer_ready_batch_path = output_dir / "trainer_ready_batch.json"
+    with open(trainer_ready_batch_path, "w", encoding="utf-8") as f:
+        json.dump(trainer_ready_batch.model_dump(mode="json"), f, ensure_ascii=False, indent=2)
+
+    trainer_tensor_path = output_dir / "trainer_tensor_payload.pt"
+    torch.save(
+        {
+            "batch": trainer_bundle.batch,
+            "non_tensor_batch": trainer_bundle.non_tensor_batch,
+            "meta_info": trainer_bundle.meta_info,
+        },
+        trainer_tensor_path,
+    )
+
+    verl_dataproto_path: Path | None = None
+    verl_conversion_status = "not_requested"
+    try:
+        verl_dataproto = trainer_bundle_to_verl_dataproto(trainer_bundle)
+        verl_dataproto_path = output_dir / "verl_dataproto.pt"
+        torch.save(verl_dataproto, verl_dataproto_path)
+        verl_conversion_status = "succeeded"
+    except Exception as exc:
+        verl_conversion_status = "failed"
+        report.warnings.append(
+            f"Vendored VERL DataProto conversion failed after tensor handoff: {type(exc).__name__}: {exc}"
+        )
+
+    checkpoint_dir = output_dir / "checkpoint"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_metadata = {
+        "checkpoint_id": f"{actor_role.value}_round{config.round_id:03d}_step{config.step_id:03d}",
+        "actor_role": actor_role.value,
+        "round_id": config.round_id,
+        "step_id": config.step_id,
+        "backend": config.backend.value,
+        "dry_run": False,
+        "handoff_only": True,
+        "weights_written": False,
+        "source_batch_path": str(source_batch_path),
+        "local_dataproto_path": str(local_dataproto_path),
+        "local_tensor_path": str(local_tensor_path),
+        "trainer_ready_batch_path": str(trainer_ready_batch_path),
+        "trainer_tensor_path": str(trainer_tensor_path),
+        "verl_dataproto_path": str(verl_dataproto_path) if verl_dataproto_path else None,
+        "verl_conversion_status": verl_conversion_status,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    checkpoint_metadata_path = checkpoint_dir / "checkpoint_metadata.json"
+    with open(checkpoint_metadata_path, "w", encoding="utf-8") as f:
+        json.dump(checkpoint_metadata, f, indent=2)
+
+    report.status = "succeeded"
+    report.handoff_only = True
+    report.weights_written = False
+    report.written_checkpoint_id = checkpoint_metadata["checkpoint_id"]
+    report.written_checkpoint_path = str(checkpoint_dir)
+    report.trainer_ready_batch_path = str(trainer_ready_batch_path)
+    report.tensor_payload_path = str(trainer_tensor_path)
+    report.warnings.extend(trainer_ready_batch.metadata.warnings)
+    report.warnings.append(
+        "VERL handoff completed; this step wrote trainer-ready artifacts but did not update model weights in-process."
+    )
+
+
+def _actor_model_path(actor_role: ActorRole, config: Phase4TrainerStepConfig) -> str | None:
+    return (
+        config.memory_builder_model_path
+        if actor_role == ActorRole.MEMORY_BUILDER
+        else config.question_agent_model_path
+    )
+
+
+def _actor_checkpoint_path(actor_role: ActorRole, config: Phase4TrainerStepConfig) -> str | None:
+    return (
+        config.memory_builder_checkpoint_path
+        if actor_role == ActorRole.MEMORY_BUILDER
+        else config.question_agent_checkpoint_path
+    )
+
+
+def _actor_checkpoint_id(actor_role: ActorRole, config: Phase4TrainerStepConfig) -> str | None:
+    return (
+        config.memory_builder_checkpoint_id
+        if actor_role == ActorRole.MEMORY_BUILDER
+        else config.question_agent_checkpoint_id
+    )
+
+
+def _write_full_checkpoint_metadata(
+    *,
+    checkpoint_dir: Path,
+    actor_role: ActorRole,
+    config: Phase4TrainerStepConfig,
+    source_batch_path: Path,
+    actor_batch: ActorUpdateBatch,
+    update_result: Any,
+    policy_metadata: Any,
+    loaded_checkpoint_path: str | None,
+    loaded_model_path: str | None,
+    handoff_dir: Path,
+) -> dict[str, Any]:
+    """Augment LocalHF checkpoint metadata with Phase 4/Code-A1 details."""
+    metadata_path = checkpoint_dir / "checkpoint_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    checkpoint_id = f"{actor_role.value}_round{config.round_id:03d}_step{config.step_id:03d}"
+    metadata.update(
+        {
+            "checkpoint_id": checkpoint_id,
+            "actor_role": actor_role.value,
+            "role": actor_role.value,
+            "round_id": config.round_id,
+            "step_id": config.step_id,
+            "phase4_backend": config.backend.value,
+            "backend": "local_hf_full_checkpoint",
+            "code_a1_compatible": True,
+            "verl_compatible": True,
+            "handoff_only": False,
+            "weights_written": bool(update_result.updated),
+            "source_batch_path": str(source_batch_path),
+            "source_batch_id": actor_batch.batch_id,
+            "loaded_checkpoint_id": _actor_checkpoint_id(actor_role, config),
+            "loaded_checkpoint_path": loaded_checkpoint_path,
+            "loaded_model_path": loaded_model_path,
+            "trainer_ready_batch_path": str(handoff_dir.parent / "trainer_ready_batch.json"),
+            "trainer_tensor_path": str(handoff_dir.parent / "trainer_tensor_payload.pt"),
+            "created_at": datetime.utcnow().isoformat(),
+            "update_result": update_result.model_dump(mode="json"),
+            "policy_checkpoint_metadata": policy_metadata.model_dump(mode="json"),
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return metadata
+
+
+def _run_phase4_full_checkpoint_update(
+    *,
+    actor_role: ActorRole,
+    config: Phase4TrainerStepConfig,
+    raw_batch: dict[str, Any],
+    source_batch_path: Path,
+    output_dir: Path,
+    report: Phase4ActorTrainerReport,
+) -> None:
+    """Run a real full-model HF update and save a full checkpoint."""
+    from gaam_graph.local_policy_clients import LocalHFPolicyClient, LocalHFPolicyConfig
+
+    actor_batch = ActorUpdateBatch.model_validate(raw_batch)
+    if actor_batch.role != actor_role:
+        raise ValueError(
+            f"Batch role mismatch: expected {actor_role.value}, got {actor_batch.role.value}"
+        )
+    if not actor_batch.items:
+        raise ValueError(f"Full checkpoint update received zero items for {actor_role.value}")
+
+    checkpoint_path = _actor_checkpoint_path(actor_role, config)
+    base_model_path = _actor_model_path(actor_role, config)
+    if checkpoint_path and Path(checkpoint_path).exists():
+        report.loaded_checkpoint_path = checkpoint_path
+        report.loaded_checkpoint_id = _actor_checkpoint_id(actor_role, config)
+        client = LocalHFPolicyClient.from_checkpoint(
+            checkpoint_path,
+            config_overrides={
+                "learning_rate": config.learning_rate,
+                "max_grad_norm": config.max_grad_norm,
+                "micro_batch_size": max(1, config.mini_batch_size),
+                "gradient_accumulation_steps": max(1, config.gradient_accumulation_steps),
+                "train_lora": False,
+                "trust_remote_code": True,
+            },
+        )
+        loaded_model_path = None
+    else:
+        if checkpoint_path:
+            report.warnings.append(
+                f"Configured checkpoint path does not exist for {actor_role.value}: {checkpoint_path}; loading base model."
+            )
+        if not base_model_path:
+            raise ValueError(f"No model path configured for {actor_role.value}")
+        loaded_model_path = base_model_path
+        client = LocalHFPolicyClient(
+            LocalHFPolicyConfig(
+                role=actor_role,
+                policy_id=f"{actor_role.value}_phase4_policy",
+                model_path=base_model_path,
+                tokenizer_path=base_model_path,
+                learning_rate=config.learning_rate,
+                max_grad_norm=config.max_grad_norm,
+                micro_batch_size=max(1, config.mini_batch_size),
+                gradient_accumulation_steps=max(1, config.gradient_accumulation_steps),
+                train_lora=False,
+                trust_remote_code=True,
+            )
+        )
+
+    update_result = client.update_grpo(actor_batch, dry_run=False)
+    checkpoint_dir = output_dir / "checkpoint"
+    policy_metadata = client.save_checkpoint(
+        checkpoint_dir,
+        round_id=config.round_id,
+        step_id=config.step_id,
+        source_batch_id=actor_batch.batch_id,
+        updated=update_result.updated,
+        metrics={
+            **update_result.metrics,
+            "reward_mean": update_result.mean_reward,
+            "advantage_mean": update_result.mean_advantage,
+            "loss": update_result.loss,
+            "grad_norm": update_result.grad_norm,
+            "phase4_backend": config.backend.value,
+            "code_a1_compatible": True,
+            "verl_compatible": True,
+        },
+    )
+
+    handoff_dir = output_dir / "verl_handoff"
+    metadata = _write_full_checkpoint_metadata(
+        checkpoint_dir=checkpoint_dir,
+        actor_role=actor_role,
+        config=config,
+        source_batch_path=source_batch_path,
+        actor_batch=actor_batch,
+        update_result=update_result,
+        policy_metadata=policy_metadata,
+        loaded_checkpoint_path=checkpoint_path if checkpoint_path and Path(checkpoint_path).exists() else None,
+        loaded_model_path=loaded_model_path,
+        handoff_dir=handoff_dir,
+    )
+
+    report.status = "succeeded" if update_result.updated else "partial"
+    report.handoff_only = False
+    report.weights_written = bool(update_result.updated)
+    report.written_checkpoint_id = metadata["checkpoint_id"]
+    report.written_checkpoint_path = str(checkpoint_dir)
+    report.loss = update_result.loss
+    report.grad_norm = update_result.grad_norm
+    report.learning_rate = config.learning_rate
+    report.reward_mean = update_result.mean_reward
+    report.advantage_mean = update_result.mean_advantage
+    if not update_result.updated:
+        report.warnings.append(
+            f"{actor_role.value} full checkpoint was saved, but update_result.updated=False"
+        )
+    report.warnings.append(
+        "Full-model checkpoint written with model/, tokenizer/, and optimizer.pt."
+    )
 
 
 def run_actor_grpo_update(
@@ -135,8 +477,10 @@ def run_actor_grpo_update(
     )
     if actor_role == ActorRole.MEMORY_BUILDER:
         report.loaded_checkpoint_id = config.memory_builder_checkpoint_id
+        report.loaded_checkpoint_path = config.memory_builder_checkpoint_path
     elif actor_role == ActorRole.QUESTION_AGENT:
         report.loaded_checkpoint_id = config.question_agent_checkpoint_id
+        report.loaded_checkpoint_path = config.question_agent_checkpoint_path
 
     try:
         # Load batch
@@ -191,6 +535,8 @@ def run_actor_grpo_update(
 
             report.written_checkpoint_id = checkpoint_metadata["checkpoint_id"]
             report.written_checkpoint_path = str(checkpoint_dir)
+            report.weights_written = False
+            report.handoff_only = False
 
         elif config.backend == Phase4TrainerBackend.LOCAL_GRPO:
             # Local GRPO: minimal local implementation
@@ -225,24 +571,37 @@ def run_actor_grpo_update(
 
             report.written_checkpoint_id = checkpoint_metadata["checkpoint_id"]
             report.written_checkpoint_path = str(checkpoint_dir)
+            report.weights_written = False
+            report.handoff_only = False
 
         elif config.backend == Phase4TrainerBackend.VERL:
-            # VERL: real distributed GRPO update
-            report.errors.append(
-                "VERL backend is not implemented in this local Phase 4 M3 trainer step"
+            _write_phase4_verl_handoff(
+                actor_role=actor_role,
+                config=config,
+                raw_batch=batch,
+                source_batch_path=batch_path,
+                output_dir=output_dir,
+                report=report,
             )
-            report.status = "failed"
+            _run_phase4_full_checkpoint_update(
+                actor_role=actor_role,
+                config=config,
+                raw_batch=batch,
+                source_batch_path=batch_path,
+                output_dir=output_dir,
+                report=report,
+            )
 
         else:
             report.errors.append(f"Unknown backend: {config.backend}")
             report.status = "failed"
 
         # Write trainer-ready batch (normalized format)
-        trainer_ready_batch_path = output_dir / "trainer_ready_batch.json"
-        with open(trainer_ready_batch_path, "w", encoding="utf-8") as f:
-            json.dump(batch, f, indent=2)
-
-        report.trainer_ready_batch_path = str(trainer_ready_batch_path)
+        if not report.trainer_ready_batch_path:
+            trainer_ready_batch_path = output_dir / "trainer_ready_batch.json"
+            with open(trainer_ready_batch_path, "w", encoding="utf-8") as f:
+                json.dump(batch, f, indent=2)
+            report.trainer_ready_batch_path = str(trainer_ready_batch_path)
 
     except Exception as e:
         report.status = "failed"
