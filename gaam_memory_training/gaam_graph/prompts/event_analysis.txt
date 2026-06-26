@@ -7,7 +7,14 @@ Rules:
 3. Use concise canonical entity names.
 4. Predicate must be selected from the allowed predicate list.
 5. Entity type must be selected from the allowed entity type list.
-6. If the event is not useful for long-term memory, set memory_worthy=false and return empty entities/facts.
+6. Topic, event_category, fact_type, and temporal_scope must be selected from the ontology.
+7. If the event is not useful for long-term memory, set memory_worthy=false and return empty entities/facts.
+8. Prefer specific fact_type values that preserve target-question answerability:
+   quantities, dates, durations, frequencies, locations, names, attributes,
+   recommendation constraints, assistant recommendations, updates, and temporal order.
+
+Ontology:
+{ontology}
 
 Allowed entity types:
 {entity_types}
@@ -18,9 +25,9 @@ Allowed predicates:
 Output schema:
 {
   "memory_worthy": true,
-  "event_category": "general | preference | project_setting | personal_fact | update | instruction | qa_evidence | other",
+  "event_category": "one allowed_event_categories value",
   "importance": 1,
-  "topic": "short topic name or null",
+  "topic": "one allowed_topics value or null",
   "entities": [
     {"surface": "...", "canonical_name": "...", "entity_type": "other", "confidence": 0.8}
   ],
@@ -30,8 +37,8 @@ Output schema:
       "predicate": "...",
       "object": "...",
       "text": "one complete factual sentence grounded in the event",
-      "fact_type": "general",
-      "temporal_scope": "active | stale | historical | unknown",
+      "fact_type": "one allowed_fact_types value",
+      "temporal_scope": "one allowed_temporal_scopes value",
       "confidence": 0.8
     }
   ],

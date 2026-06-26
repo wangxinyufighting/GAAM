@@ -6,13 +6,17 @@ Rules:
 2. Each abstract memory must be supported by at least 2 facts unless it is a high-level summary of a session topic.
 3. Do not overgeneralize.
 4. Do not include sensitive private information unless it is necessary for future task performance.
+5. scope must be selected from the ontology.
+
+Ontology:
+{ontology}
 
 Output schema:
 {
   "abstract_memories": [
     {
       "summary": "...",
-      "scope": "communication_preference | project_design | stable_user_fact | task_context | general",
+      "scope": "one allowed_abstract_scopes value",
       "supporting_fact_ids": ["fact_x", "fact_y"],
       "confidence": 0.8
     }
