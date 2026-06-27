@@ -240,6 +240,52 @@ def load_torch_state(torch, path: Path, *, map_location: str):
         return torch.load(path, map_location=map_location)
 
 
+def pad_training_tensors(torch, micro_batch_data: list[dict[str, Any]], pad_token_id: int) -> dict[str, Any]:
+    """Pad variable-length prompt/response tensors for one training micro-batch."""
+    max_len = max(data["input_ids"].shape[1] for data in micro_batch_data)
+    padded: dict[str, list[Any]] = {
+        "input_ids": [],
+        "attention_mask": [],
+        "labels": [],
+    }
+
+    for data in micro_batch_data:
+        seq_len = data["input_ids"].shape[1]
+        pad_len = max_len - seq_len
+        if pad_len == 0:
+            padded["input_ids"].append(data["input_ids"])
+            padded["attention_mask"].append(data["attention_mask"])
+            padded["labels"].append(data["labels"])
+            continue
+
+        padded["input_ids"].append(
+            torch.nn.functional.pad(
+                data["input_ids"],
+                (0, pad_len),
+                value=pad_token_id,
+            )
+        )
+        padded["attention_mask"].append(
+            torch.nn.functional.pad(
+                data["attention_mask"],
+                (0, pad_len),
+                value=0,
+            )
+        )
+        padded["labels"].append(
+            torch.nn.functional.pad(
+                data["labels"],
+                (0, pad_len),
+                value=-100,
+            )
+        )
+
+    return {
+        key: torch.cat(values, dim=0)
+        for key, values in padded.items()
+    }
+
+
 # ============================================================================
 # Local HF Policy Client
 # ============================================================================
@@ -512,10 +558,15 @@ class LocalHFPolicyClient(BasePolicyClient):
             if not micro_batch_data:
                 continue
 
-            # Stack tensors
-            input_ids = torch.cat([d["input_ids"] for d in micro_batch_data], dim=0).to(self.device)
-            attention_mask = torch.cat([d["attention_mask"] for d in micro_batch_data], dim=0).to(self.device)
-            labels = torch.cat([d["labels"] for d in micro_batch_data], dim=0).to(self.device)
+            # Stack tensors after padding variable-length sequences.
+            padded_batch = pad_training_tensors(
+                torch,
+                micro_batch_data,
+                pad_token_id=self.tokenizer.pad_token_id or 0,
+            )
+            input_ids = padded_batch["input_ids"].to(self.device)
+            attention_mask = padded_batch["attention_mask"].to(self.device)
+            labels = padded_batch["labels"].to(self.device)
             advantages_tensor = torch.tensor(micro_batch_advantages, dtype=torch.float32, device=self.device)
 
             # Forward pass

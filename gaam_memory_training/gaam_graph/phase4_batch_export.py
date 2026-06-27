@@ -49,6 +49,54 @@ def _load_json_file(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _normalize_sample_as_update_item(
+    sample: dict[str, Any],
+    *,
+    actor_role: str,
+    source_record_id: str,
+    group_id: str,
+) -> dict[str, Any] | None:
+    """Normalize local-dataproto or legacy samples into ActorUpdateItem shape."""
+    prompt = sample.get("prompt", sample.get("prompt_text"))
+    response = sample.get("response", sample.get("response_text"))
+    sample_id = sample.get("sample_id")
+    record_id = sample.get("record_id") or source_record_id
+
+    if not sample_id or not record_id or prompt is None or response is None:
+        return None
+
+    reward = sample.get("reward", sample.get("reward_score", sample.get("score", 0.0)))
+    advantage = sample.get("advantage", sample.get("advantages", 0.0))
+    if isinstance(advantage, list):
+        numeric_advantages = [
+            float(value)
+            for value in advantage
+            if isinstance(value, (int, float))
+        ]
+        advantage = (
+            sum(numeric_advantages) / len(numeric_advantages)
+            if numeric_advantages
+            else 0.0
+        )
+
+    return {
+        "sample_id": str(sample_id),
+        "group_id": group_id,
+        "record_id": str(record_id),
+        "role": actor_role,
+        "prompt": str(prompt),
+        "response": str(response),
+        "reward": float(reward),
+        "advantage": float(advantage),
+        "selected_for_update": bool(sample.get("selected_for_update", True)),
+        "metadata": {
+            **(sample.get("metadata") or {}),
+            "source_record_id": source_record_id,
+            "source_format": "normalized_sample",
+        },
+    }
+
+
 def _resolve_artifact_path(path_value: str | Path, run_dir: Path) -> Path:
     """Resolve artifact paths that may be absolute or relative to a run ancestor."""
     path = Path(path_value)
@@ -205,28 +253,43 @@ def merge_actor_update_batches(
 
         # Current GAAM ActorUpdateBatch schema uses items.
         for item in batch.get("items", []):
-            item_role = item.get("role", actor_role)
+            item_role = item.get("role", item.get("actor_role", actor_role))
             if not _actor_role_matches(item_role, actor_role):
                 continue
-            item_copy = item.copy()
-            original_group_id = item_copy.get("group_id", "")
-            item_copy["group_id"] = f"{source_record_id}_{original_group_id}"
-            item_copy["source_record_id"] = source_record_id
-            merged_items.append(item_copy)
+            original_group_id = item.get("group_id", "")
+            prefixed_group_id = f"{source_record_id}_{original_group_id}"
+            if all(key in item for key in ("role", "prompt", "response")):
+                item_copy = item.copy()
+                item_copy["group_id"] = prefixed_group_id
+                item_copy["source_record_id"] = source_record_id
+                merged_items.append(item_copy)
+            else:
+                normalized = _normalize_sample_as_update_item(
+                    item,
+                    actor_role=actor_role,
+                    source_record_id=source_record_id,
+                    group_id=prefixed_group_id,
+                )
+                if normalized is not None:
+                    merged_items.append(normalized)
 
         # Local dataproto exports use top-level samples instead of items/groups.
         for sample in batch.get("samples", []):
-            sample_role = sample.get("role", actor_role)
+            sample_role = sample.get("role", sample.get("actor_role", actor_role))
             if not _actor_role_matches(sample_role, actor_role):
                 continue
-            sample_copy = sample.copy()
-            original_group_id = sample_copy.get("group_id") or batch.get(
+            original_group_id = sample.get("group_id") or batch.get(
                 "batch_id",
                 "samples",
             )
-            sample_copy["group_id"] = f"{source_record_id}_{original_group_id}"
-            sample_copy["source_record_id"] = source_record_id
-            merged_items.append(sample_copy)
+            normalized = _normalize_sample_as_update_item(
+                sample,
+                actor_role=actor_role,
+                source_record_id=source_record_id,
+                group_id=f"{source_record_id}_{original_group_id}",
+            )
+            if normalized is not None:
+                merged_items.append(normalized)
 
         # Legacy grouped schema used by earlier tests/prototypes.
         groups = batch.get("groups", [])
