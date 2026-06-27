@@ -132,7 +132,33 @@ fi
 
 TRAIN_FILE="${DATASET_DIR}/${ACTOR_ROLE}.train.parquet"
 VAL_FILE="${DATASET_DIR}/${ACTOR_ROLE}.val.parquet"
+DATASET_MANIFEST="${DATASET_DIR}/${ACTOR_ROLE}.dataset_manifest.json"
 REWARD_FILE="${ROOT_DIR}/gaam_graph/verl_gaam_reward.py"
+
+NUM_TRAIN_ROWS="$("${PYTHON_BIN}" - "${DATASET_MANIFEST}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(int(manifest.get("num_train_rows", 0)))
+PY
+)"
+
+if [[ "${NUM_TRAIN_ROWS}" -lt 1 ]]; then
+  echo "Native VERL dataset has zero train rows: ${DATASET_MANIFEST}" >&2
+  exit 1
+fi
+
+if [[ "${TRAIN_BATCH_SIZE}" -gt "${NUM_TRAIN_ROWS}" ]]; then
+  echo "TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE} is larger than num_train_rows=${NUM_TRAIN_ROWS}; capping to ${NUM_TRAIN_ROWS} to avoid an empty VERL dataloader."
+  TRAIN_BATCH_SIZE="${NUM_TRAIN_ROWS}"
+fi
+
+if [[ "${PPO_MINI_BATCH_SIZE}" -gt "${TRAIN_BATCH_SIZE}" ]]; then
+  echo "PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE} is larger than TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}; capping to ${TRAIN_BATCH_SIZE}."
+  PPO_MINI_BATCH_SIZE="${TRAIN_BATCH_SIZE}"
+fi
 
 if [[ "${SAVE_HF_MODEL}" == "True" ]]; then
   CHECKPOINT_CONTENTS="['model','hf_model','optimizer','extra']"
@@ -151,6 +177,8 @@ VERL_ARGS=(
   data.filter_overlong_prompts=False
   data.truncation=left
   actor_rollout_ref.model.path="${MODEL_PATH}"
+  actor_rollout_ref.model.lora_rank=0
+  actor_rollout_ref.model.lora_alpha=0
   actor_rollout_ref.model.use_remove_padding=True
   actor_rollout_ref.model.enable_gradient_checkpointing=True
   actor_rollout_ref.actor.optim.lr="${LR}"
