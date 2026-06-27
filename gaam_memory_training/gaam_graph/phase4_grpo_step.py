@@ -350,6 +350,13 @@ def _run_phase4_full_checkpoint_update(
     if not actor_batch.items:
         raise ValueError(f"Full checkpoint update received zero items for {actor_role.value}")
 
+    selected_count = sum(1 for item in actor_batch.items if item.selected_for_update)
+    print(
+        f"[GRPO update] {actor_role.value}: loading policy for "
+        f"{len(actor_batch.items)} items ({selected_count} selected)",
+        flush=True,
+    )
+
     checkpoint_path = _actor_checkpoint_path(actor_role, config)
     base_model_path = _actor_model_path(actor_role, config)
     if checkpoint_path and Path(checkpoint_path).exists():
@@ -390,7 +397,20 @@ def _run_phase4_full_checkpoint_update(
             )
         )
 
+    print(
+        f"[GRPO update] {actor_role.value}: running advantage-weighted update "
+        f"lr={config.learning_rate} mini_batch_size={config.mini_batch_size} "
+        f"grad_accum={config.gradient_accumulation_steps}",
+        flush=True,
+    )
     update_result = client.update_grpo(actor_batch, dry_run=False)
+    print(
+        f"[GRPO update] {actor_role.value}: updated={update_result.updated} "
+        f"loss={update_result.loss} grad_norm={update_result.grad_norm} "
+        f"optimizer_steps={update_result.metrics.get('num_optimizer_steps')}",
+        flush=True,
+    )
+
     checkpoint_dir = output_dir / "checkpoint"
     policy_metadata = client.save_checkpoint(
         checkpoint_dir,
@@ -440,6 +460,11 @@ def _run_phase4_full_checkpoint_update(
         )
     report.warnings.append(
         "Full-model checkpoint written with model/, tokenizer/, and optimizer.pt."
+    )
+    print(
+        f"[GRPO update] {actor_role.value}: checkpoint written to {checkpoint_dir} "
+        f"weights_written={report.weights_written}",
+        flush=True,
     )
 
 
