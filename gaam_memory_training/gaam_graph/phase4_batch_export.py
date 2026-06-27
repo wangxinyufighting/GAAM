@@ -261,6 +261,9 @@ def merge_actor_update_batches(
             if all(key in item for key in ("role", "prompt", "response")):
                 item_copy = item.copy()
                 item_copy["group_id"] = prefixed_group_id
+                # Prefix sample_id to ensure uniqueness across records
+                if "sample_id" in item_copy:
+                    item_copy["sample_id"] = f"{source_record_id}_{item_copy['sample_id']}"
                 item_copy["source_record_id"] = source_record_id
                 merged_items.append(item_copy)
             else:
@@ -271,6 +274,8 @@ def merge_actor_update_batches(
                     group_id=prefixed_group_id,
                 )
                 if normalized is not None:
+                    # Prefix sample_id to ensure uniqueness across records
+                    normalized["sample_id"] = f"{source_record_id}_{normalized['sample_id']}"
                     merged_items.append(normalized)
 
         # Local dataproto exports use top-level samples instead of items/groups.
@@ -289,6 +294,8 @@ def merge_actor_update_batches(
                 group_id=f"{source_record_id}_{original_group_id}",
             )
             if normalized is not None:
+                # Prefix sample_id to ensure uniqueness across records
+                normalized["sample_id"] = f"{source_record_id}_{normalized['sample_id']}"
                 merged_items.append(normalized)
 
         # Legacy grouped schema used by earlier tests/prototypes.
@@ -302,6 +309,16 @@ def merge_actor_update_batches(
             group_copy = group.copy()
             group_copy["group_id"] = prefixed_group_id
             group_copy["source_record_id"] = source_record_id
+
+            # Prefix sample_id in group samples to ensure uniqueness
+            if "samples" in group_copy:
+                prefixed_samples = []
+                for sample in group_copy["samples"]:
+                    sample_copy = sample.copy()
+                    if "sample_id" in sample_copy:
+                        sample_copy["sample_id"] = f"{source_record_id}_{sample_copy['sample_id']}"
+                    prefixed_samples.append(sample_copy)
+                group_copy["samples"] = prefixed_samples
 
             merged_groups.append(group_copy)
 
