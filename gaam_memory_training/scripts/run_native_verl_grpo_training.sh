@@ -39,6 +39,12 @@ MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-2048}"
 MAX_HISTORY_CHARS="${MAX_HISTORY_CHARS:-16000}"
 MAX_ORACLE_CHARS="${MAX_ORACLE_CHARS:-12000}"
+QUESTIONS_PER_CASE="${QUESTIONS_PER_CASE:-8}"
+MEMORY_INPUT_MODE="${MEMORY_INPUT_MODE:-full}"
+MEMORY_SESSION_CHUNK_SIZE="${MEMORY_SESSION_CHUNK_SIZE:-4}"
+MAX_MEMORY_CHUNK_CHARS="${MAX_MEMORY_CHUNK_CHARS:-}"
+MAX_PREVIOUS_MEMORY_CHARS="${MAX_PREVIOUS_MEMORY_CHARS:-6000}"
+ALLOW_STATIC_INCREMENTAL_SCAFFOLD="${ALLOW_STATIC_INCREMENTAL_SCAFFOLD:-0}"
 MAX_RECORDS_PER_SPLIT="${MAX_RECORDS_PER_SPLIT:-}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
@@ -52,6 +58,7 @@ PROJECT_NAME="${PROJECT_NAME:-gaam_native_verl_grpo}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-${ACTOR_ROLE}_qwen3_0_6b}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-False}"
 SAVE_HF_MODEL="${SAVE_HF_MODEL:-True}"
+REQUIRE_HF_CHECKPOINT="${REQUIRE_HF_CHECKPOINT:-1}"
 
 if [[ "${ACTOR_ROLE}" != "memory_builder" && "${ACTOR_ROLE}" != "question_agent" ]]; then
   echo "ACTOR_ROLE must be memory_builder or question_agent, got: ${ACTOR_ROLE}" >&2
@@ -109,6 +116,9 @@ echo "DATASET_DIR=${DATASET_DIR}"
 echo "CHECKPOINT_DIR=${CHECKPOINT_DIR}"
 echo "NUM_GPUS=${NUM_GPUS}"
 echo "ROLLOUT_N=${ROLLOUT_N}"
+echo "MEMORY_INPUT_MODE=${MEMORY_INPUT_MODE}"
+echo "SAVE_HF_MODEL=${SAVE_HF_MODEL}"
+echo "REQUIRE_HF_CHECKPOINT=${REQUIRE_HF_CHECKPOINT}"
 
 EXPORT_ARGS=(
   scripts/export_native_verl_grpo_dataset.py
@@ -118,7 +128,19 @@ EXPORT_ARGS=(
   --actor_role "${ACTOR_ROLE}"
   --max_history_chars "${MAX_HISTORY_CHARS}"
   --max_oracle_chars "${MAX_ORACLE_CHARS}"
+  --questions_per_case "${QUESTIONS_PER_CASE}"
+  --memory_input_mode "${MEMORY_INPUT_MODE}"
+  --memory_session_chunk_size "${MEMORY_SESSION_CHUNK_SIZE}"
+  --max_previous_memory_chars "${MAX_PREVIOUS_MEMORY_CHARS}"
 )
+
+if [[ -n "${MAX_MEMORY_CHUNK_CHARS}" ]]; then
+  EXPORT_ARGS+=(--max_memory_chunk_chars "${MAX_MEMORY_CHUNK_CHARS}")
+fi
+
+if [[ "${ALLOW_STATIC_INCREMENTAL_SCAFFOLD}" == "1" || "${ALLOW_STATIC_INCREMENTAL_SCAFFOLD}" == "True" || "${ALLOW_STATIC_INCREMENTAL_SCAFFOLD}" == "true" ]]; then
+  EXPORT_ARGS+=(--allow_static_incremental_scaffold)
+fi
 
 if [[ -n "${SPLIT_MANIFEST}" ]]; then
   EXPORT_ARGS+=(--split_manifest "${SPLIT_MANIFEST}")
@@ -160,7 +182,7 @@ if [[ "${PPO_MINI_BATCH_SIZE}" -gt "${TRAIN_BATCH_SIZE}" ]]; then
   PPO_MINI_BATCH_SIZE="${TRAIN_BATCH_SIZE}"
 fi
 
-if [[ "${SAVE_HF_MODEL}" == "True" ]]; then
+if [[ "${SAVE_HF_MODEL}" == "1" || "${SAVE_HF_MODEL}" == "True" || "${SAVE_HF_MODEL}" == "true" ]]; then
   CHECKPOINT_CONTENTS="['model','hf_model','optimizer','extra']"
 else
   CHECKPOINT_CONTENTS="['model','optimizer','extra']"
@@ -226,6 +248,31 @@ fi
 echo "== Launching native VERL GRPO =="
 echo "${PYTHON_BIN} ${VERL_ARGS[*]}"
 "${PYTHON_BIN}" "${VERL_ARGS[@]}"
+
+if [[ "${REQUIRE_HF_CHECKPOINT}" == "1" || "${REQUIRE_HF_CHECKPOINT}" == "True" || "${REQUIRE_HF_CHECKPOINT}" == "true" ]]; then
+  if [[ "${SAVE_HF_MODEL}" == "0" || "${SAVE_HF_MODEL}" == "False" || "${SAVE_HF_MODEL}" == "false" ]]; then
+    echo "REQUIRE_HF_CHECKPOINT=1 conflicts with SAVE_HF_MODEL=${SAVE_HF_MODEL}." >&2
+    echo "Enable SAVE_HF_MODEL or set REQUIRE_HF_CHECKPOINT=0 only for smoke tests." >&2
+    exit 1
+  fi
+
+  CHECKPOINT_FOUND="$("${PYTHON_BIN}" - "${CHECKPOINT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+checkpoint_dir = Path(sys.argv[1])
+candidates = []
+for name in ("huggingface", "hf_model"):
+    candidates.extend(path for path in checkpoint_dir.rglob(name) if path.is_dir())
+print("1" if candidates else "0")
+PY
+)"
+  if [[ "${CHECKPOINT_FOUND}" != "1" ]]; then
+    echo "Native VERL finished without writing a Hugging Face checkpoint under: ${CHECKPOINT_DIR}" >&2
+    echo "This is treated as a failed training step because downstream rounds need updated full-model weights." >&2
+    exit 1
+  fi
+fi
 
 echo "== Native VERL GRPO finished =="
 echo "Checkpoints: ${CHECKPOINT_DIR}"

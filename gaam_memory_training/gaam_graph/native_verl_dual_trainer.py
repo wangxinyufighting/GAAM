@@ -68,9 +68,16 @@ class GAAMDualRayTrainerConfig:
     test_freq: int = 1
     max_history_chars: int = 16000
     max_oracle_chars: int = 12000
+    questions_per_case: int = 8
+    memory_input_mode: str = "full"
+    memory_session_chunk_size: int = 4
+    max_memory_chunk_chars: int | None = None
+    max_previous_memory_chars: int = 6000
+    allow_static_incremental_scaffold: bool = False
     max_records_per_split: int | None = None
     logger: str = "console"
     save_hf_model: bool = True
+    require_hf_checkpoint: bool = True
     dry_run: bool = False
 
     def validate(self) -> None:
@@ -213,11 +220,19 @@ class GAAMDualRayTrainer:
         record["returncode"] = returncode
         record["finished_at"] = _utc_now()
         if returncode == 0:
-            record["status"] = "succeeded"
             latest_hf_model = find_latest_hf_model_path(checkpoint_dir)
             if latest_hf_model:
+                record["status"] = "succeeded"
                 record["latest_hf_model_path"] = str(latest_hf_model)
+            elif self.config.require_hf_checkpoint:
+                record["status"] = "failed"
+                record["errors"].append(
+                    "Native VERL process exited successfully but no Hugging Face checkpoint directory "
+                    f"was found under {checkpoint_dir}. This actor step is treated as failed because "
+                    "GAAM full-model co-training requires materialized updated weights."
+                )
             else:
+                record["status"] = "succeeded"
                 record["warnings"].append(
                     "Native VERL step succeeded, but no Hugging Face checkpoint directory was found. "
                     "The next round will reuse the previous model path."
@@ -257,6 +272,11 @@ class GAAMDualRayTrainer:
             "MAX_RESPONSE_LENGTH": str(actor_config.max_response_length),
             "MAX_HISTORY_CHARS": str(self.config.max_history_chars),
             "MAX_ORACLE_CHARS": str(self.config.max_oracle_chars),
+            "QUESTIONS_PER_CASE": str(self.config.questions_per_case),
+            "MEMORY_INPUT_MODE": self.config.memory_input_mode,
+            "MEMORY_SESSION_CHUNK_SIZE": str(self.config.memory_session_chunk_size),
+            "MAX_PREVIOUS_MEMORY_CHARS": str(self.config.max_previous_memory_chars),
+            "ALLOW_STATIC_INCREMENTAL_SCAFFOLD": "1" if self.config.allow_static_incremental_scaffold else "0",
             "TOTAL_EPOCHS": str(self.config.total_epochs_per_actor_step),
             "SAVE_FREQ": str(self.config.save_freq),
             "TEST_FREQ": str(self.config.test_freq),
@@ -266,11 +286,14 @@ class GAAMDualRayTrainer:
             "LOGGER": self.config.logger,
             "EXPERIMENT_NAME": f"dual_{actor_role}",
             "SAVE_HF_MODEL": "True" if self.config.save_hf_model else "False",
+            "REQUIRE_HF_CHECKPOINT": "1" if self.config.require_hf_checkpoint else "0",
         }
         if self.config.split_manifest:
             env["SPLIT_MANIFEST"] = str(self.config.split_manifest)
         if self.config.max_records_per_split is not None:
             env["MAX_RECORDS_PER_SPLIT"] = str(self.config.max_records_per_split)
+        if self.config.max_memory_chunk_chars is not None:
+            env["MAX_MEMORY_CHUNK_CHARS"] = str(self.config.max_memory_chunk_chars)
         if self.config.total_training_steps_per_actor_step is not None:
             env["TOTAL_TRAINING_STEPS"] = str(self.config.total_training_steps_per_actor_step)
 

@@ -30,6 +30,44 @@ def main() -> int:
     parser.add_argument("--split_manifest", type=Path, default=None)
     parser.add_argument("--max_history_chars", type=int, default=16000)
     parser.add_argument("--max_oracle_chars", type=int, default=12000)
+    parser.add_argument(
+        "--questions_per_case",
+        type=int,
+        default=8,
+        help="Target number of questions generated per case for question_agent prompts.",
+    )
+    parser.add_argument(
+        "--memory_input_mode",
+        choices=["full", "incremental"],
+        default="full",
+        help="Memory Builder input mode. 'incremental' exports one row per session chunk.",
+    )
+    parser.add_argument(
+        "--memory_session_chunk_size",
+        type=int,
+        default=4,
+        help="Number of sessions per incremental Memory Builder chunk. Use <=0 for one full chunk.",
+    )
+    parser.add_argument(
+        "--max_memory_chunk_chars",
+        type=int,
+        default=None,
+        help="Prompt character budget for each incremental raw-history chunk.",
+    )
+    parser.add_argument(
+        "--max_previous_memory_chars",
+        type=int,
+        default=6000,
+        help="Prompt character budget for previous Current Memory in incremental mode.",
+    )
+    parser.add_argument(
+        "--allow_static_incremental_scaffold",
+        action="store_true",
+        help=(
+            "Allow non-stateful incremental prompt-format export. "
+            "Use only for smoke tests; production training should use a stateful rollout worker."
+        ),
+    )
     parser.add_argument("--max_records_per_split", type=int, default=None)
 
     args = parser.parse_args()
@@ -42,6 +80,12 @@ def main() -> int:
             split_manifest_path=args.split_manifest,
             max_history_chars=args.max_history_chars,
             max_oracle_chars=args.max_oracle_chars,
+            questions_per_case=args.questions_per_case,
+            memory_input_mode=args.memory_input_mode,
+            memory_session_chunk_size=args.memory_session_chunk_size,
+            max_memory_chunk_chars=args.max_memory_chunk_chars,
+            max_previous_memory_chars=args.max_previous_memory_chars,
+            allow_static_incremental_scaffold=args.allow_static_incremental_scaffold,
             max_records_per_split=args.max_records_per_split,
         )
     )

@@ -664,6 +664,14 @@ def run_phase4_grpo_trainer_step(
     Returns:
         Phase4TrainerStepManifest with results
     """
+    if config.backend in {Phase4TrainerBackend.LOCAL_GRPO, Phase4TrainerBackend.VERL} and not config.allow_mvp_backends:
+        raise ValueError(
+            f"Phase4TrainerBackend.{config.backend.value} is a legacy MVP trainer path. "
+            "LOCAL_GRPO does not update weights, and the old VERL backend is only a handoff/local-HF shim. "
+            "Use scripts/run_native_verl_dual_cotraining.sh for real Code-A1/VERL GRPO training, "
+            "or set allow_mvp_backends=True only for smoke/debug runs."
+        )
+
     run_dir = Path(config.source_multi_case_run_dir)
     output_dir = Path(config.output_dir)
 

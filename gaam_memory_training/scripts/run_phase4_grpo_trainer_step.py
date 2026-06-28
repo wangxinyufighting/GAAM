@@ -194,6 +194,14 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Strict no-leakage validation (default: True)",
     )
+    parser.add_argument(
+        "--allow_mvp_backends",
+        action="store_true",
+        help=(
+            "Allow legacy local_grpo/verl MVP trainer paths for smoke tests. "
+            "Do not use this for production training."
+        ),
+    )
 
     # Execution flags
     parser.add_argument(
@@ -260,6 +268,7 @@ def main() -> int:
         require_non_empty_batch=not args.allow_empty_batch,
         allow_empty_batch=args.allow_empty_batch,
         strict_no_leakage=args.strict_no_leakage,
+        allow_mvp_backends=args.allow_mvp_backends,
         overwrite=args.overwrite,
         resume=args.resume,
         seed=args.seed,

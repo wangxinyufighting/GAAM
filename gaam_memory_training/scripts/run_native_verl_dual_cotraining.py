@@ -59,6 +59,29 @@ def main() -> int:
     parser.add_argument("--question_max_response_length", type=int, default=None)
     parser.add_argument("--max_history_chars", type=int, default=16000)
     parser.add_argument("--max_oracle_chars", type=int, default=12000)
+    parser.add_argument(
+        "--questions_per_case",
+        type=int,
+        default=8,
+        help="Target number of questions generated per case by the Question Agent.",
+    )
+    parser.add_argument(
+        "--memory_input_mode",
+        choices=["full", "incremental"],
+        default="full",
+        help="Memory Builder input mode. 'incremental' exports one row per session chunk.",
+    )
+    parser.add_argument("--memory_session_chunk_size", type=int, default=4)
+    parser.add_argument("--max_memory_chunk_chars", type=int, default=None)
+    parser.add_argument("--max_previous_memory_chars", type=int, default=6000)
+    parser.add_argument(
+        "--allow_static_incremental_scaffold",
+        action="store_true",
+        help=(
+            "Allow non-stateful incremental prompt-format export. "
+            "Use only for smoke tests; production training should use a stateful rollout worker."
+        ),
+    )
     parser.add_argument("--max_records_per_split", type=int, default=None)
     parser.add_argument("--total_epochs_per_actor_step", type=int, default=1)
     parser.add_argument("--total_training_steps_per_actor_step", type=int, default=None)
@@ -69,6 +92,14 @@ def main() -> int:
     parser.add_argument("--gpu_memory_utilization", default="0.6")
     parser.add_argument("--logger", default="console")
     parser.add_argument("--no_save_hf_model", action="store_true")
+    parser.add_argument(
+        "--no_require_hf_checkpoint",
+        action="store_true",
+        help=(
+            "Do not fail an actor step when native VERL exits without an HF checkpoint. "
+            "Use only for smoke tests; production full-model training should require checkpoints."
+        ),
+    )
     parser.add_argument("--dry_run", action="store_true")
 
     args = parser.parse_args()
@@ -123,9 +154,16 @@ def main() -> int:
             test_freq=args.test_freq,
             max_history_chars=args.max_history_chars,
             max_oracle_chars=args.max_oracle_chars,
+            questions_per_case=args.questions_per_case,
+            memory_input_mode=args.memory_input_mode,
+            memory_session_chunk_size=args.memory_session_chunk_size,
+            max_memory_chunk_chars=args.max_memory_chunk_chars,
+            max_previous_memory_chars=args.max_previous_memory_chars,
+            allow_static_incremental_scaffold=args.allow_static_incremental_scaffold,
             max_records_per_split=args.max_records_per_split,
             logger=args.logger,
             save_hf_model=not args.no_save_hf_model,
+            require_hf_checkpoint=not args.no_require_hf_checkpoint,
             dry_run=args.dry_run,
         )
     )

@@ -444,3 +444,118 @@ def test_reward_report_contains_diagnostics(sample_oracle_graph, sample_current_
     assert len(report.question_items) > 0
     assert report.failure_summary is not None
     assert len(report.components) > 0
+
+
+def test_reward_manager_llm_judge_scores_answer_correctness(
+    sample_oracle_graph,
+    sample_current_memory,
+):
+    """Test correctness_mode=llm_judge calls an API-style judge client."""
+
+    class FakeJudgeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, *, system, user, schema_hint=None):
+            self.calls.append({"system": system, "user": user, "schema_hint": schema_hint})
+            return {"correctness": 0.91, "rationale": "Prediction matches the expected answer."}
+
+    fake_llm = FakeJudgeLLM()
+    manager = RewardManager(correctness_mode="llm_judge", llm=fake_llm)
+    questions = [
+        {
+            "question_id": "q_001",
+            "record_id": "test_record",
+            "question": "What language does the user like?",
+            "answer": "Python",
+            "supporting_node_ids": ["fact_001"],
+        }
+    ]
+    answers = [
+        {
+            "question_id": "q_001",
+            "prediction": "They like Python.",
+            "answer_status": "answered",
+            "supporting_memory_ids": ["mem_fact_001"],
+            "supporting_evidence": [
+                {
+                    "memory_id": "mem_fact_001",
+                    "content": "The user likes Python programming for data analysis.",
+                }
+            ],
+        }
+    ]
+
+    report = manager.score_memory_builder(
+        current_memory=sample_current_memory,
+        questions=questions,
+        answer_reports=answers,
+        oracle_graph=sample_oracle_graph,
+    )
+
+    assert fake_llm.calls
+    assert report.question_items[0].correctness == pytest.approx(0.91)
+    assert "Prediction matches" in report.question_items[0].rationale
+    assert report.config["correctness_mode"] == "llm_judge"
+
+
+def test_reward_manager_llm_judge_scores_question_diagnostic_value(sample_oracle_graph):
+    """Test Question Agent diagnostic value is no longer a fixed MVP placeholder."""
+
+    class FakeJudgeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat_json(self, *, system, user, schema_hint=None):
+            self.calls.append({"system": system, "user": user})
+            return {"diagnostic_value": 0.83, "rationale": "Good multi-session diagnostic set."}
+
+    fake_llm = FakeJudgeLLM()
+    manager = RewardManager(correctness_mode="llm_judge", llm=fake_llm)
+    report = manager.score_question_agent(
+        questions=[
+            {
+                "question_id": "q_001",
+                "record_id": "test_record",
+                "question": "Across sessions, what technical preference remained stable?",
+                "question_type": "multi_session",
+                "answer": "Python for data analysis",
+                "supporting_node_ids": ["fact_001", "fact_002"],
+                "supporting_session_ids": ["s1", "s2"],
+            }
+        ],
+        validity_reports=[{"question_id": "q_001", "verdict": "accept"}],
+        answer_reports=[{"question_id": "q_001", "prediction": "Wrong", "answer_status": "answered"}],
+        oracle_graph=sample_oracle_graph,
+    )
+
+    diagnostic = next(component for component in report.components if component.name == "diagnostic_value")
+    assert fake_llm.calls
+    assert diagnostic.score == pytest.approx(0.83)
+    assert diagnostic.metadata["mode"] == "llm_judge"
+    assert "api_key_configured" in diagnostic.metadata["llm_judge"]["config"]
+
+
+def test_reward_manager_coverage_gain_from_snapshots(sample_oracle_graph):
+    """Test coverage gain uses before/after snapshots instead of a fixed value."""
+    manager = RewardManager()
+    report = manager.score_question_agent(
+        questions=[
+            {
+                "question_id": "q_001",
+                "record_id": "test_record",
+                "question": "What does the user prefer?",
+                "question_type": "preference",
+                "answer": "Python",
+                "supporting_node_ids": ["fact_001"],
+                "supporting_session_ids": ["s1"],
+            }
+        ],
+        validity_reports=[{"question_id": "q_001", "verdict": "accept"}],
+        answer_reports=[{"question_id": "q_001", "prediction": "Python"}],
+        oracle_graph=sample_oracle_graph,
+        coverage_before={"coverage": 0.2},
+        coverage_after={"coverage": 0.7},
+    )
+
+    assert report.coverage_gain == pytest.approx(0.5)

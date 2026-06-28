@@ -65,6 +65,7 @@ class Phase4TrainerStepConfig(BaseModel):
     require_non_empty_batch: bool = True
     allow_empty_batch: bool = False
     strict_no_leakage: bool = True
+    allow_mvp_backends: bool = False
     overwrite: bool = False
     resume: bool = False
     seed: int = 0

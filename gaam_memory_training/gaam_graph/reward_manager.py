@@ -6,9 +6,11 @@ Computes rewards for Memory Builder and Question Agent.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List
 
+from gaam_graph.llm import LLMError, OpenAICompatibleLLM
 from gaam_graph.memory_schema import validate_current_memory
 from gaam_graph.oracle_graph_loader import OracleGraphLoader
 from gaam_graph.reward_schema import (
@@ -205,6 +207,7 @@ class RewardManager:
         self.weights = weights or DEFAULT_MEMORY_BUILDER_WEIGHTS.copy()
         self.weakness_book = weakness_book
         self.llm = llm
+        self._llm_judge_config = self._build_llm_judge_config()
 
     def score_memory_builder(
         self,
@@ -313,7 +316,11 @@ class RewardManager:
         answer_status = answer_report.get("answer_status", "")
 
         # Correctness
-        correctness = score_answer_correctness(prediction, expected_answer)
+        correctness, correctness_metadata = self._score_answer_correctness_with_mode(
+            question=question,
+            prediction=prediction,
+            expected_answer=expected_answer,
+        )
 
         # Evidence support
         evidence_support = self._score_evidence_support(
@@ -360,6 +367,7 @@ class RewardManager:
             supporting_oracle_node_ids=question.get("supporting_node_ids", []),
             supporting_memory_ids=answer_report.get("supporting_memory_ids", []),
             related_session_ids=question.get("supporting_session_ids", []),
+            rationale=correctness_metadata.get("rationale", ""),
         )
 
     def _score_evidence_support(
@@ -791,7 +799,10 @@ class RewardManager:
 
         # Coverage gain
         if coverage_before and coverage_after:
-            coverage_gain = 0.5  # Placeholder
+            coverage_gain = self._score_coverage_gain_from_snapshots(
+                coverage_before=coverage_before,
+                coverage_after=coverage_after,
+            )
         else:
             unique_node_ids = set()
             for q in oracle_valid_questions:
@@ -799,11 +810,19 @@ class RewardManager:
             total_oracle_nodes = oracle_graph.node_count
             coverage_gain = len(unique_node_ids) / total_oracle_nodes if total_oracle_nodes else 0.0
 
-        # Diagnostic value
-        diagnostic_value = 0.5  # Placeholder for MVP
-
         # Diversity
         diversity = self._score_question_diversity(questions)
+
+        diagnostic_value, diagnostic_metadata = self._score_question_diagnostic_value(
+            questions=questions,
+            validity_reports=validity_reports,
+            answer_reports=answer_reports,
+            oracle_graph=oracle_graph,
+            oracle_validity=oracle_validity,
+            adversarial_success=adversarial_success,
+            coverage_gain=coverage_gain,
+            diversity=diversity,
+        )
 
         # Components
         weights = DEFAULT_QUESTION_AGENT_WEIGHTS
@@ -831,6 +850,7 @@ class RewardManager:
                 score=diagnostic_value,
                 weight=weights["diagnostic_value"],
                 weighted_score=diagnostic_value * weights["diagnostic_value"],
+                metadata=diagnostic_metadata,
             ),
             RewardComponent(
                 name="diversity",
@@ -851,7 +871,11 @@ class RewardManager:
             coverage_gain=coverage_gain,
             adversarial_success_rate=adversarial_success,
             diversity_score=diversity,
-            config={"weights": weights},
+            config={
+                "weights": weights,
+                "correctness_mode": self.correctness_mode,
+                "llm_judge": self._redacted_llm_judge_config(),
+            },
         )
 
     def _score_question_diversity(self, questions: List[dict]) -> float:
@@ -870,6 +894,244 @@ class RewardManager:
         session_diversity = min(len(all_sessions) / 3.0, 1.0)  # Target ~3 sessions
 
         return (type_diversity + session_diversity) / 2.0
+
+    def _score_answer_correctness_with_mode(
+        self,
+        *,
+        question: dict,
+        prediction: str,
+        expected_answer: str,
+    ) -> tuple[float, dict[str, Any]]:
+        """Score answer correctness with optional API LLM-as-judge."""
+        heuristic_score = score_answer_correctness(prediction, expected_answer)
+        if self.correctness_mode != "llm_judge":
+            return heuristic_score, {"mode": "heuristic"}
+
+        judge_payload = {
+            "question": question.get("question", ""),
+            "question_type": question.get("question_type", "other"),
+            "expected_answer": expected_answer,
+            "prediction": prediction,
+        }
+        judge = self._call_llm_judge(
+            system=(
+                "You are a strict answer-correctness judge for GAAM. "
+                "Return only JSON. Do not reveal benchmark target questions."
+            ),
+            user=(
+                "Judge whether the prediction correctly answers the generated training question. "
+                "Return JSON with fields: correctness in [0,1], rationale.\n\n"
+                f"Payload:\n{judge_payload}"
+            ),
+        )
+        if judge.get("status") != "succeeded":
+            if self._llm_judge_required():
+                raise LLMError(str(judge.get("error", "LLM judge failed")))
+            return heuristic_score, {
+                "mode": "heuristic_fallback",
+                "llm_judge": judge,
+            }
+
+        try:
+            judge_score = clamp(float(judge.get("correctness", judge.get("score", 0.0))))
+        except Exception:
+            judge_score = heuristic_score
+        return judge_score, {
+            "mode": "llm_judge",
+            "llm_judge": judge,
+            "rationale": str(judge.get("rationale", "")),
+        }
+
+    def _score_coverage_gain_from_snapshots(
+        self,
+        *,
+        coverage_before: dict,
+        coverage_after: dict,
+    ) -> float:
+        """Compute coverage gain from before/after coverage snapshots."""
+        before = self._extract_coverage_value(coverage_before)
+        after = self._extract_coverage_value(coverage_after)
+        if before is None or after is None:
+            return 0.0
+        return clamp(after - before)
+
+    def _extract_coverage_value(self, payload: dict) -> float | None:
+        """Extract a scalar coverage value from common snapshot shapes."""
+        for key in ("coverage", "coverage_rate", "covered_ratio", "oracle_coverage"):
+            if key in payload:
+                try:
+                    return clamp(float(payload[key]))
+                except Exception:
+                    continue
+        covered = payload.get("covered_node_ids") or payload.get("covered_nodes")
+        total = payload.get("total_node_count") or payload.get("total_nodes")
+        if isinstance(covered, list) and total:
+            try:
+                return clamp(len(set(str(x) for x in covered)) / float(total))
+            except Exception:
+                return None
+        return None
+
+    def _score_question_diagnostic_value(
+        self,
+        *,
+        questions: List[dict],
+        validity_reports: List[dict],
+        answer_reports: List[dict],
+        oracle_graph: OracleGraphLoader,
+        oracle_validity: float,
+        adversarial_success: float,
+        coverage_gain: float,
+        diversity: float,
+    ) -> tuple[float, dict[str, Any]]:
+        """Score whether the question set diagnoses useful memory weaknesses."""
+        heuristic_score = clamp(
+            0.30 * oracle_validity
+            + 0.30 * adversarial_success
+            + 0.20 * coverage_gain
+            + 0.20 * diversity
+        )
+        if self.correctness_mode != "llm_judge":
+            return heuristic_score, {"mode": "heuristic"}
+
+        prompt_payload = {
+            "num_questions": len(questions),
+            "questions": [
+                {
+                    "question_id": q.get("question_id"),
+                    "question_type": q.get("question_type"),
+                    "question": q.get("question"),
+                    "supporting_node_ids": q.get("supporting_node_ids", []),
+                    "supporting_session_ids": q.get("supporting_session_ids", []),
+                }
+                for q in questions[:32]
+            ],
+            "validity_reports": validity_reports[:32],
+            "answer_reports": [
+                {
+                    "question_id": a.get("question_id"),
+                    "answer_status": a.get("answer_status"),
+                    "prediction": a.get("prediction", "")[:1000],
+                }
+                for a in answer_reports[:32]
+            ],
+            "oracle_node_count": oracle_graph.node_count,
+            "rule_scores": {
+                "oracle_validity": oracle_validity,
+                "adversarial_success": adversarial_success,
+                "coverage_gain": coverage_gain,
+                "diversity": diversity,
+            },
+        }
+        judge = self._call_llm_judge(
+            system=(
+                "You are a strict reward judge for GAAM Question Agent outputs. "
+                "Return only JSON. Do not reveal or infer benchmark target questions."
+            ),
+            user=(
+                "Judge whether this generated question set has diagnostic value for training "
+                "a memory builder. It should be oracle-valid, answerable, diverse, difficult, "
+                "and useful for exposing memory weaknesses. Return JSON with fields: "
+                "diagnostic_value in [0,1], rationale.\n\n"
+                f"Payload:\n{prompt_payload}"
+            ),
+        )
+        if judge.get("status") != "succeeded":
+            if self._llm_judge_required():
+                raise LLMError(str(judge.get("error", "LLM judge failed")))
+            return heuristic_score, {
+                "mode": "heuristic_fallback",
+                "llm_judge": judge,
+            }
+        try:
+            score = clamp(float(judge.get("diagnostic_value", judge.get("overall", heuristic_score))))
+        except Exception:
+            score = heuristic_score
+        return score, {
+            "mode": "llm_judge",
+            "llm_judge": judge,
+            "rationale": str(judge.get("rationale", "")),
+        }
+
+    def _call_llm_judge(self, *, system: str, user: str) -> dict[str, Any]:
+        """Call the configured OpenAI-compatible LLM judge API."""
+        try:
+            llm = self._ensure_llm_judge()
+            payload = llm.chat_json(system=system, user=user[: self._judge_max_chars()])
+            if not isinstance(payload, dict):
+                raise LLMError("LLM judge did not return a JSON object")
+            payload["status"] = "succeeded"
+            payload["config"] = self._redacted_llm_judge_config()
+            return payload
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "config": self._redacted_llm_judge_config(),
+            }
+
+    def _ensure_llm_judge(self) -> Any:
+        """Return an explicit or env-configured OpenAI-compatible judge client."""
+        if self.llm is not None:
+            return self.llm
+        api_key = self._llm_judge_config["api_key"]
+        if not api_key:
+            raise LLMError(
+                "LLM judge requires GAAM_REWARD_MANAGER_JUDGE_API_KEY, "
+                "GAAM_REWARD_JUDGE_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY"
+            )
+        self.llm = OpenAICompatibleLLM(
+            model=self._llm_judge_config["model"],
+            api_key=api_key,
+            base_url=self._llm_judge_config["base_url"],
+            timeout=self._llm_judge_config["timeout"],
+            temperature=0.0,
+        )
+        return self.llm
+
+    def _build_llm_judge_config(self) -> dict[str, Any]:
+        """Build API judge config from env without logging secrets."""
+        return {
+            "base_url": os.getenv(
+                "GAAM_REWARD_MANAGER_JUDGE_BASE_URL",
+                os.getenv(
+                    "GAAM_REWARD_JUDGE_BASE_URL",
+                    os.getenv("DEEPSEEK_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
+                ),
+            ),
+            "api_key": os.getenv(
+                "GAAM_REWARD_MANAGER_JUDGE_API_KEY",
+                os.getenv(
+                    "GAAM_REWARD_JUDGE_API_KEY",
+                    os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY", "")),
+                ),
+            ),
+            "model": os.getenv(
+                "GAAM_REWARD_MANAGER_JUDGE_MODEL",
+                os.getenv("GAAM_REWARD_JUDGE_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+            ),
+            "timeout": int(os.getenv("GAAM_REWARD_MANAGER_JUDGE_TIMEOUT", os.getenv("GAAM_REWARD_JUDGE_TIMEOUT", "60"))),
+        }
+
+    def _redacted_llm_judge_config(self) -> dict[str, Any]:
+        """Return safe judge config metadata for reward reports."""
+        return {
+            "base_url": str(self._llm_judge_config.get("base_url", "")),
+            "model": str(self._llm_judge_config.get("model", "")),
+            "timeout": self._llm_judge_config.get("timeout"),
+            "api_key_env": "GAAM_REWARD_MANAGER_JUDGE_API_KEY or GAAM_REWARD_JUDGE_API_KEY",
+            "api_key_configured": bool(self._llm_judge_config.get("api_key")),
+        }
+
+    def _judge_max_chars(self) -> int:
+        try:
+            return max(1000, int(os.getenv("GAAM_REWARD_MANAGER_JUDGE_MAX_CHARS", "20000")))
+        except Exception:
+            return 20000
+
+    def _llm_judge_required(self) -> bool:
+        value = os.getenv("GAAM_REWARD_MANAGER_JUDGE_REQUIRED", os.getenv("GAAM_REWARD_JUDGE_REQUIRED", "0"))
+        return value in {"1", "true", "True", "yes", "YES"}
 
 
 def classify_question_failure(

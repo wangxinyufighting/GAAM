@@ -9,6 +9,7 @@ oracle graph artifacts. The exported rows are consumed by
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from gaam_graph.utils import read_json, stable_id, write_json
 
 
 VALID_ACTOR_ROLES = {"memory_builder", "question_agent"}
+VALID_MEMORY_INPUT_MODES = {"full", "incremental"}
 TEXT_KEYS = {
     "text",
     "content",
@@ -42,6 +44,12 @@ class NativeVerlExportConfig:
     split_manifest_path: Path | None = None
     max_history_chars: int = 16000
     max_oracle_chars: int = 12000
+    questions_per_case: int = 8
+    memory_input_mode: str = "full"
+    memory_session_chunk_size: int = 4
+    max_memory_chunk_chars: int | None = None
+    max_previous_memory_chars: int = 6000
+    allow_static_incremental_scaffold: bool = False
     max_records_per_split: int | None = None
     val_split_preference: tuple[str, ...] = ("dev", "test", "train")
 
@@ -50,6 +58,18 @@ def export_native_verl_grpo_dataset(config: NativeVerlExportConfig) -> dict[str,
     """Export GAAM actor prompts to VERL train/val parquet files."""
     if config.actor_role not in VALID_ACTOR_ROLES:
         raise ValueError(f"Unsupported actor_role: {config.actor_role}")
+    if config.memory_input_mode not in VALID_MEMORY_INPUT_MODES:
+        raise ValueError(
+            f"Unsupported memory_input_mode: {config.memory_input_mode}. "
+            f"Expected one of: {sorted(VALID_MEMORY_INPUT_MODES)}"
+        )
+    if config.memory_input_mode == "incremental" and not config.allow_static_incremental_scaffold:
+        raise ValueError(
+            "memory_input_mode=incremental would create independent parquet rows with a static "
+            "Previous Current Memory scaffold. That is not a real stateful incremental rollout. "
+            "Use a stateful rollout worker for production training, or set "
+            "--allow_static_incremental_scaffold only for prompt-format smoke tests."
+        )
 
     records = LongMemEvalLoader(str(config.input_path)).load()
     records_by_id = {record.record_id: record for record in records}
@@ -87,9 +107,16 @@ def export_native_verl_grpo_dataset(config: NativeVerlExportConfig) -> dict[str,
         "val_record_ids": val_ids,
         "max_history_chars": config.max_history_chars,
         "max_oracle_chars": config.max_oracle_chars,
+        "questions_per_case": config.questions_per_case,
+        "memory_input_mode": config.memory_input_mode,
+        "memory_session_chunk_size": config.memory_session_chunk_size,
+        "max_memory_chunk_chars": config.max_memory_chunk_chars,
+        "max_previous_memory_chars": config.max_previous_memory_chars,
+        "allow_static_incremental_scaffold": config.allow_static_incremental_scaffold,
         "notes": [
             "Rows are compatible with verl.trainer.main_ppo.",
             "Memory Builder rows use raw history only and do not include benchmark target questions.",
+            "Static incremental scaffold export is disabled by default because it is not a real stateful rollout.",
             "Question Agent rows use sanitized oracle graph content and do not include benchmark target questions.",
         ],
     }
@@ -162,7 +189,7 @@ def _build_rows(
     split_name: str,
 ) -> list[dict[str, Any]]:
     rows = []
-    for index, record_id in enumerate(record_ids):
+    for record_index, record_id in enumerate(record_ids):
         record = records_by_id[record_id]
         graph_path = config.oracle_graph_dir / f"{record_id}.graph.json"
         oracle_graph = read_json(graph_path)
@@ -173,22 +200,30 @@ def _build_rows(
         required_terms = _extract_required_terms(oracle_graph, limit=64)
 
         if config.actor_role == "memory_builder":
-            prompt = _memory_builder_prompt(record, config.max_history_chars)
-            ground_truth = {
-                "actor_role": "memory_builder",
-                "record_id": record_id,
-                "required_terms": required_terms,
-                "oracle_digest": oracle_digest,
-            }
-            ability = "memory_building"
-            data_source = "gaam_memory_builder"
+            rows.extend(
+                _memory_builder_rows(
+                    config=config,
+                    record=record,
+                    graph_path=graph_path,
+                    oracle_digest=oracle_digest,
+                    required_terms=required_terms,
+                    split_name=split_name,
+                    record_index=record_index,
+                    row_start_index=len(rows),
+                )
+            )
+            continue
         else:
-            prompt = _question_agent_prompt(oracle_digest)
+            prompt = _question_agent_prompt(
+                oracle_digest,
+                questions_per_case=config.questions_per_case,
+            )
             ground_truth = {
                 "actor_role": "question_agent",
                 "record_id": record_id,
                 "required_terms": required_terms,
                 "oracle_digest": oracle_digest,
+                "questions_per_case": config.questions_per_case,
             }
             ability = "question_generation"
             data_source = "gaam_question_agent"
@@ -204,15 +239,184 @@ def _build_rows(
                 },
                 "extra_info": {
                     "split": split_name,
-                    "index": index,
+                    "index": len(rows),
                     "record_id": record_id,
                     "actor_role": config.actor_role,
                     "oracle_graph_path": str(graph_path),
-                    "row_id": stable_id("verl_row", config.actor_role, split_name, record_id, index),
+                    "row_id": stable_id("verl_row", config.actor_role, split_name, record_id, len(rows)),
                 },
             }
         )
     return rows
+
+
+def _memory_builder_rows(
+    *,
+    config: NativeVerlExportConfig,
+    record: LMERecord,
+    graph_path: Path,
+    oracle_digest: str,
+    required_terms: list[str],
+    split_name: str,
+    record_index: int,
+    row_start_index: int,
+) -> list[dict[str, Any]]:
+    if config.memory_input_mode == "incremental":
+        return _incremental_memory_builder_rows(
+            config=config,
+            record=record,
+            graph_path=graph_path,
+            oracle_digest=oracle_digest,
+            required_terms=required_terms,
+            split_name=split_name,
+            record_index=record_index,
+            row_start_index=row_start_index,
+        )
+
+    prompt = _memory_builder_prompt(record, config.max_history_chars)
+    ground_truth = {
+        "actor_role": "memory_builder",
+        "record_id": record.record_id,
+        "required_terms": required_terms,
+        "oracle_digest": oracle_digest,
+        "memory_input_mode": "full",
+        "chunk_index": 0,
+        "num_chunks": 1,
+    }
+    return [
+        _make_row(
+            data_source="gaam_memory_builder",
+            prompt=prompt,
+            ability="memory_building",
+            ground_truth=ground_truth,
+            split_name=split_name,
+            index=row_start_index,
+            record_id=record.record_id,
+            actor_role="memory_builder",
+            graph_path=graph_path,
+            row_id_parts=("verl_row", "memory_builder", split_name, record.record_id, record_index, "full"),
+            extra_info={
+                "memory_input_mode": "full",
+                "chunk_index": 0,
+                "num_chunks": 1,
+            },
+        )
+    ]
+
+
+def _incremental_memory_builder_rows(
+    *,
+    config: NativeVerlExportConfig,
+    record: LMERecord,
+    graph_path: Path,
+    oracle_digest: str,
+    required_terms: list[str],
+    split_name: str,
+    record_index: int,
+    row_start_index: int,
+) -> list[dict[str, Any]]:
+    history = raw_history_from_lme_record(record)
+    chunks = _chunk_sessions(history.sessions, config.memory_session_chunk_size)
+    if not chunks:
+        chunks = [[]]
+
+    rows: list[dict[str, Any]] = []
+    processed_session_ids: list[str] = []
+    num_chunks = len(chunks)
+    for chunk_index, sessions in enumerate(chunks):
+        session_ids = [str(session.session_id) for session in sessions]
+        previous_memory = _previous_current_memory_scaffold(
+            record_id=record.record_id,
+            processed_session_ids=processed_session_ids,
+            build_step=chunk_index,
+        )
+        prompt = _incremental_memory_builder_prompt(
+            record_id=record.record_id,
+            sessions=sessions,
+            previous_memory=previous_memory,
+            chunk_index=chunk_index,
+            num_chunks=num_chunks,
+            max_chunk_chars=config.max_memory_chunk_chars or config.max_history_chars,
+            max_previous_memory_chars=config.max_previous_memory_chars,
+        )
+        ground_truth = {
+            "actor_role": "memory_builder",
+            "record_id": record.record_id,
+            "required_terms": required_terms,
+            "oracle_digest": oracle_digest,
+            "memory_input_mode": "incremental",
+            "chunk_index": chunk_index,
+            "num_chunks": num_chunks,
+            "session_ids": session_ids,
+            "processed_session_ids": list(processed_session_ids),
+        }
+        rows.append(
+            _make_row(
+                data_source="gaam_memory_builder",
+                prompt=prompt,
+                ability="memory_building",
+                ground_truth=ground_truth,
+                split_name=split_name,
+                index=row_start_index + len(rows),
+                record_id=record.record_id,
+                actor_role="memory_builder",
+                graph_path=graph_path,
+                row_id_parts=(
+                    "verl_row",
+                    "memory_builder",
+                    split_name,
+                    record.record_id,
+                    record_index,
+                    "incremental",
+                    chunk_index,
+                ),
+                extra_info={
+                    "memory_input_mode": "incremental",
+                    "chunk_index": chunk_index,
+                    "num_chunks": num_chunks,
+                    "session_ids": session_ids,
+                    "processed_session_ids": list(processed_session_ids),
+                },
+            )
+        )
+        processed_session_ids.extend(session_ids)
+    return rows
+
+
+def _make_row(
+    *,
+    data_source: str,
+    prompt: list[dict[str, str]],
+    ability: str,
+    ground_truth: dict[str, Any],
+    split_name: str,
+    index: int,
+    record_id: str,
+    actor_role: str,
+    graph_path: Path,
+    row_id_parts: tuple[Any, ...],
+    extra_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    info = {
+        "split": split_name,
+        "index": index,
+        "record_id": record_id,
+        "actor_role": actor_role,
+        "oracle_graph_path": str(graph_path),
+        "row_id": stable_id(*row_id_parts),
+    }
+    if extra_info:
+        info.update(extra_info)
+    return {
+        "data_source": data_source,
+        "prompt": prompt,
+        "ability": ability,
+        "reward_model": {
+            "style": "rule",
+            "ground_truth": ground_truth,
+        },
+        "extra_info": info,
+    }
 
 
 def _memory_builder_prompt(record: LMERecord, max_history_chars: int) -> list[dict[str, str]]:
@@ -234,7 +438,44 @@ def _memory_builder_prompt(record: LMERecord, max_history_chars: int) -> list[di
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def _question_agent_prompt(oracle_digest: str) -> list[dict[str, str]]:
+def _incremental_memory_builder_prompt(
+    *,
+    record_id: str,
+    sessions: list[Any],
+    previous_memory: dict[str, Any],
+    chunk_index: int,
+    num_chunks: int,
+    max_chunk_chars: int,
+    max_previous_memory_chars: int,
+) -> list[dict[str, str]]:
+    payload = _history_payload_from_sessions(record_id, sessions)
+    chunk_text = _limit_text(_format_history_payload(payload), max_chunk_chars)
+    previous_memory_text = _limit_text(
+        json.dumps(previous_memory, ensure_ascii=False, indent=2),
+        max_previous_memory_chars,
+    )
+    system = (
+        "You are the GAAM Memory Builder. Incrementally update Current Memory from raw "
+        "conversation history only. Do not mention benchmark questions or answers. Output JSON "
+        "with keys record_id, memory_graph, memory_summaries, and metadata."
+    )
+    user = (
+        f"record_id: {record_id}\n"
+        f"incremental_step: {chunk_index + 1}/{num_chunks}\n\n"
+        "Previous Current Memory:\n"
+        f"{previous_memory_text}\n\n"
+        "Current raw-history chunk:\n"
+        f"{chunk_text}\n\n"
+        "Update the Current Memory by merging the previous memory with the new chunk. Preserve "
+        "concrete facts, updates, preferences, multi-session evidence, and useful abstractions. "
+        "Remove redundancy, avoid over-compression, and include provenance fields when possible. "
+        "Return the full updated Current Memory JSON, not a patch."
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _question_agent_prompt(oracle_digest: str, *, questions_per_case: int) -> list[dict[str, str]]:
+    questions_per_case = max(1, int(questions_per_case))
     system = (
         "You are the GAAM Question Agent. Generate diverse training questions from an oracle "
         "memory graph digest. Do not copy or infer any benchmark target question. Output JSON "
@@ -244,8 +485,10 @@ def _question_agent_prompt(oracle_digest: str) -> list[dict[str, str]]:
     user = (
         "Oracle graph digest:\n"
         f"{oracle_digest}\n\n"
-        "Generate questions covering single-hop, multi-hop, multi-session, temporal, preference, "
-        "personal fact, contradiction/update, and summary/abstraction cases when supported."
+        f"Generate exactly {questions_per_case} questions. The JSON questions array must contain "
+        f"exactly {questions_per_case} items. Cover single-hop, multi-hop, multi-session, temporal, "
+        "preference, personal fact, contradiction/update, and summary/abstraction cases when "
+        "supported. Do not generate fewer or more questions."
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -262,6 +505,65 @@ def _format_history_payload(payload: dict[str, Any]) -> str:
                 f"speaker={turn.get('speaker', '')}: {turn.get('text', '')}"
             )
     return "\n".join(lines)
+
+
+def _history_payload_from_sessions(record_id: str, sessions: list[Any]) -> dict[str, Any]:
+    return {
+        "record_id": record_id,
+        "sessions": [
+            {
+                "session_id": session.session_id,
+                "timestamp": session.timestamp,
+                "turns": [
+                    {
+                        "event_id": turn.event_id,
+                        "turn_id": turn.turn_id,
+                        "speaker": turn.speaker,
+                        "text": turn.text,
+                    }
+                    for turn in session.turns
+                ],
+            }
+            for session in sessions
+        ],
+    }
+
+
+def _chunk_sessions(sessions: list[Any], chunk_size: int) -> list[list[Any]]:
+    if chunk_size <= 0:
+        return [list(sessions)]
+    return [list(sessions[index : index + chunk_size]) for index in range(0, len(sessions), chunk_size)]
+
+
+def _previous_current_memory_scaffold(
+    *,
+    record_id: str,
+    processed_session_ids: list[str],
+    build_step: int,
+) -> dict[str, Any]:
+    return {
+        "record_id": record_id,
+        "memory_graph": {
+            "nodes": [],
+            "edges": [],
+        },
+        "memory_summaries": {
+            "user_profile": "",
+            "stable_preferences": "",
+            "active_plans": "",
+            "recent_changes": "",
+            "cross_session_abstractions": "",
+        },
+        "metadata": {
+            "build_mode": "incremental",
+            "build_step": build_step,
+            "processed_session_ids": processed_session_ids,
+            "note": (
+                "Schema scaffold only. During real rollout this field should contain the "
+                "model-generated Current Memory from previous chunks."
+            ),
+        },
+    }
 
 
 def _oracle_graph_digest(oracle_graph: dict[str, Any], *, max_chars: int) -> str:
