@@ -49,6 +49,16 @@ if [[ "$1" == "scripts/export_production_artifact_bundle.py" ]]; then
   touch {marker_dir / "bundled"}
   exit 0
 fi
+if [[ "$1" == "scripts/verify_production_artifact_bundle.py" ]]; then
+  echo "bundle verify args=$*"
+  touch {marker_dir / "bundle_verified"}
+  exit 0
+fi
+if [[ "$1" == "scripts/verify_production_e2e_completion.py" ]]; then
+  echo "completion verify args=$*"
+  touch {marker_dir / "completion_verified"}
+  exit 0
+fi
 if [[ "$1" == "scripts/audit_production_run.py" ]]; then
   echo "audit args=$*"
   touch {marker_dir / "audited"}
@@ -76,6 +86,7 @@ if [[ "$1" == "scripts/run_production_post_training_evaluation.sh" ]]; then
   echo "evaluation SPLIT_MANIFEST=$SPLIT_MANIFEST"
   echo "evaluation EVALUATION_SPLIT=$EVALUATION_SPLIT"
   echo "evaluation ANSWER_BACKEND=$ANSWER_BACKEND"
+  echo "evaluation REQUIRE_RESOLVED_CHECKPOINTS=$REQUIRE_RESOLVED_CHECKPOINTS"
   touch {marker_dir / "evaluated"}
   exit 0
 fi
@@ -96,10 +107,12 @@ exec /bin/bash "$@"
         "TRAINING_OUTPUT_DIR": str(training_output),
         "EVAL_OUTPUT_DIR": str(eval_output),
         "QUESTIONS_PER_CASE": "5",
+        "MEMORY_API_KEY": "memory-key",
         "ANSWER_BACKEND": "no_llm",
         "JUDGE_BACKEND": "heuristic",
         "VERIFY_TRAINING_OUTPUT": "0",
         "VERIFY_EVALUATION_OUTPUT": "0",
+        "REQUIRE_RESOLVED_CHECKPOINTS": "0",
         "REQUIRE_CUDA": "0",
         "CHECK_IMPORTS": "0",
         "REQUIRE_VERL_IMPORT": "0",
@@ -123,6 +136,8 @@ exec /bin/bash "$@"
     assert (marker_dir / "evaluated").exists()
     assert (marker_dir / "audited").exists()
     assert (marker_dir / "bundled").exists()
+    assert (marker_dir / "bundle_verified").exists()
+    assert (marker_dir / "completion_verified").exists()
     assert f"training SPLIT_MANIFEST={split_manifest}" in result.stdout
     assert f"training OUTPUT_DIR={training_output}" in result.stdout
     assert "training QUESTIONS_PER_CASE=5" in result.stdout
@@ -130,14 +145,17 @@ exec /bin/bash "$@"
     assert f"evaluation EVAL_OUTPUT_DIR={eval_output}" in result.stdout
     assert f"evaluation SPLIT_MANIFEST={split_manifest}" in result.stdout
     assert "evaluation EVALUATION_SPLIT=test" in result.stdout
+    assert "evaluation REQUIRE_RESOLVED_CHECKPOINTS=0" in result.stdout
     assert f"--training_output_dir {training_output}" in result.stdout
     assert f"--evaluation_output_dir {eval_output}" in result.stdout
     assert f"--split_manifest {split_manifest}" in result.stdout
     assert "--expected_evaluation_split test" in result.stdout
     assert f"--memory_model_path {memory_model}" in result.stdout
+    assert "--memory_api_key memory-key" in result.stdout
     assert "--require_cuda 0" in result.stdout
     assert "--check_imports 0" in result.stdout
     assert "--bundle_output_dir outputs/production_artifact_bundle" in result.stdout
+    assert "completion verify args=" in result.stdout
 
 
 def test_production_e2e_wrapper_can_skip_auto_split_and_evaluation(tmp_path: Path):
@@ -168,6 +186,15 @@ fi
 if [[ "$1" == "scripts/export_production_artifact_bundle.py" ]]; then
   touch {marker_dir / "bundled"}
   exit 0
+fi
+if [[ "$1" == "scripts/verify_production_artifact_bundle.py" ]]; then
+  echo "bundle verify args=$*"
+  touch {marker_dir / "bundle_verified"}
+  exit 0
+fi
+if [[ "$1" == "scripts/verify_production_e2e_completion.py" ]]; then
+  touch {marker_dir / "completion_should_not_run"}
+  exit 9
 fi
 if [[ "$1" == "scripts/audit_production_run.py" ]]; then
   touch {marker_dir / "audited"}
@@ -207,6 +234,7 @@ exec /bin/bash "$@"
         "AUTO_CREATE_SPLIT": "0",
         "RUN_EVALUATION": "0",
         "RUN_FINAL_AUDIT": "0",
+        "VERIFY_PRODUCTION_COMPLETION": "0",
         "VERIFY_TRAINING_OUTPUT": "0",
         "REQUIRE_CUDA": "0",
         "CHECK_IMPORTS": "0",
@@ -228,6 +256,8 @@ exec /bin/bash "$@"
     assert (marker_dir / "trained").exists()
     assert (marker_dir / "preflighted").exists()
     assert (marker_dir / "bundled").exists()
+    assert (marker_dir / "bundle_verified").exists()
     assert not (marker_dir / "split_should_not_run").exists()
     assert not (marker_dir / "eval_should_not_run").exists()
     assert not (marker_dir / "audited").exists()
+    assert not (marker_dir / "completion_should_not_run").exists()

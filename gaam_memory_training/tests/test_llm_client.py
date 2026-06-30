@@ -115,3 +115,20 @@ def test_openai_compatible_llm_raises_without_api_key():
         assert "API_KEY" in str(exc)
     else:
         raise AssertionError("Expected LLMError")
+
+
+def test_openai_compatible_llm_blank_deepseek_env_falls_back_to_openai_env(monkeypatch):
+    """Blank DeepSeek env values should not mask OpenAI-compatible fallback config."""
+    monkeypatch.setenv("GAAM_LLM_MODEL", "")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "")
+    monkeypatch.setenv("LLM_MODEL", "fallback-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "fallback-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai-compatible.example/v1")
+
+    llm = OpenAICompatibleLLM()
+
+    assert llm.model == "fallback-model"
+    assert llm.api_key == "fallback-key"
+    assert llm.base_url == "https://openai-compatible.example/v1"

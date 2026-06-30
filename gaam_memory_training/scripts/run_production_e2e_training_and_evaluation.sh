@@ -102,6 +102,13 @@ EXPORT_ARTIFACT_BUNDLE="${EXPORT_ARTIFACT_BUNDLE:-1}"
 # Output directory for the compact production evidence bundle.
 ARTIFACT_BUNDLE_DIR="${ARTIFACT_BUNDLE_DIR:-outputs/production_artifact_bundle}"
 
+# If 1, verify the compact evidence bundle after export.
+VERIFY_ARTIFACT_BUNDLE="${VERIFY_ARTIFACT_BUNDLE:-1}"
+
+# If 1, verify all final production evidence after training/evaluation/audit/
+# bundle checks have completed.
+VERIFY_PRODUCTION_COMPLETION="${VERIFY_PRODUCTION_COMPLETION:-1}"
+
 # Optional run id stored in the bundle manifest. Useful for remote server runs.
 RUN_ID="${RUN_ID:-}"
 
@@ -250,6 +257,8 @@ echo "CHECK_IMPORTS=${CHECK_IMPORTS}"
 echo "RUN_FINAL_AUDIT=${RUN_FINAL_AUDIT}"
 echo "EXPORT_ARTIFACT_BUNDLE=${EXPORT_ARTIFACT_BUNDLE}"
 echo "ARTIFACT_BUNDLE_DIR=${ARTIFACT_BUNDLE_DIR}"
+echo "VERIFY_ARTIFACT_BUNDLE=${VERIFY_ARTIFACT_BUNDLE}"
+echo "VERIFY_PRODUCTION_COMPLETION=${VERIFY_PRODUCTION_COMPLETION}"
 echo "EVALUATION_SPLIT=${EVALUATION_SPLIT}"
 echo "ROUNDS=${ROUNDS}"
 echo "ORDER=${ORDER}"
@@ -297,7 +306,7 @@ if [[ "${RUN_PREFLIGHT}" == "1" || "${RUN_PREFLIGHT}" == "True" || "${RUN_PREFLI
     --memory_backend "${MEMORY_BACKEND}"
     --answer_backend "${ANSWER_BACKEND}"
     --judge_backend "${JUDGE_BACKEND}"
-    --memory_api_key "${GAAM_MEMORY_BUILDER_API_KEY:-}"
+    --memory_api_key "${MEMORY_API_KEY:-${GAAM_MEMORY_BUILDER_API_KEY:-${DEEPSEEK_API_KEY:-${OPENAI_API_KEY:-}}}}"
     --answer_api_key "${ANSWER_API_KEY}"
     --judge_api_key "${JUDGE_API_KEY}"
     --reward_judge_enabled "${GAAM_REWARD_JUDGE_ENABLED}"
@@ -357,6 +366,7 @@ if [[ "${RUN_EVALUATION}" == "1" || "${RUN_EVALUATION}" == "True" || "${RUN_EVAL
   TRAINING_OUTPUT_DIR="${TRAINING_OUTPUT_DIR}" \
   VERIFY_TRAINING_OUTPUT="${VERIFY_TRAINING_OUTPUT}" \
   VERIFY_EVALUATION_OUTPUT="${VERIFY_EVALUATION_OUTPUT}" \
+  REQUIRE_RESOLVED_CHECKPOINTS="${REQUIRE_RESOLVED_CHECKPOINTS}" \
   INPUT_PATH="${INPUT_PATH}" \
   SPLIT_MANIFEST="${SPLIT_MANIFEST}" \
   EVALUATION_SPLIT="${EVALUATION_SPLIT}" \
@@ -413,6 +423,46 @@ if [[ "${EXPORT_ARTIFACT_BUNDLE}" == "1" || "${EXPORT_ARTIFACT_BUNDLE}" == "True
   fi
   echo "== Exporting compact production artifact bundle =="
   "${PYTHON_BIN}" "${BUNDLE_ARGS[@]}"
+
+  if [[ "${VERIFY_ARTIFACT_BUNDLE}" == "1" || "${VERIFY_ARTIFACT_BUNDLE}" == "True" || "${VERIFY_ARTIFACT_BUNDLE}" == "true" ]]; then
+    VERIFY_BUNDLE_ARGS=(
+      scripts/verify_production_artifact_bundle.py
+      --bundle_output_dir "${ARTIFACT_BUNDLE_DIR}"
+    )
+    if [[ ! ( "${RUN_EVALUATION}" == "1" || "${RUN_EVALUATION}" == "True" || "${RUN_EVALUATION}" == "true" ) ]]; then
+      VERIFY_BUNDLE_ARGS+=(--no_require_evaluation)
+    fi
+    echo "== Verifying compact production artifact bundle =="
+    "${PYTHON_BIN}" "${VERIFY_BUNDLE_ARGS[@]}"
+  fi
+fi
+
+if [[ "${VERIFY_PRODUCTION_COMPLETION}" == "1" || "${VERIFY_PRODUCTION_COMPLETION}" == "True" || "${VERIFY_PRODUCTION_COMPLETION}" == "true" ]]; then
+  if [[ "${RUN_EVALUATION}" == "1" || "${RUN_EVALUATION}" == "True" || "${RUN_EVALUATION}" == "true" ]]; then
+    if [[ "${RUN_FINAL_AUDIT}" == "1" || "${RUN_FINAL_AUDIT}" == "True" || "${RUN_FINAL_AUDIT}" == "true" ]]; then
+      if [[ "${EXPORT_ARTIFACT_BUNDLE}" == "1" || "${EXPORT_ARTIFACT_BUNDLE}" == "True" || "${EXPORT_ARTIFACT_BUNDLE}" == "true" ]]; then
+        COMPLETION_ARGS=(
+          scripts/verify_production_e2e_completion.py
+          --training_output_dir "${TRAINING_OUTPUT_DIR}"
+          --evaluation_output_dir "${EVAL_OUTPUT_DIR}"
+          --artifact_bundle_dir "${ARTIFACT_BUNDLE_DIR}"
+          --expected_evaluation_split "${EVALUATION_SPLIT}"
+          --split_manifest "${SPLIT_MANIFEST}"
+        )
+        echo "== Verifying final production E2E completion evidence =="
+        "${PYTHON_BIN}" "${COMPLETION_ARGS[@]}"
+      else
+        echo "VERIFY_PRODUCTION_COMPLETION=1 requires EXPORT_ARTIFACT_BUNDLE=1." >&2
+        exit 1
+      fi
+    else
+      echo "VERIFY_PRODUCTION_COMPLETION=1 requires RUN_FINAL_AUDIT=1." >&2
+      exit 1
+    fi
+  else
+    echo "VERIFY_PRODUCTION_COMPLETION=1 requires RUN_EVALUATION=1." >&2
+    exit 1
+  fi
 fi
 
 echo "== GAAM production E2E complete =="

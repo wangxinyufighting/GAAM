@@ -15,11 +15,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
-
 from gaam_graph.answer_agent import FrozenAnswerer
 from gaam_graph.answer_schema import AnswerRequest
-from gaam_graph.llm import LocalHFChatLLM, OpenAICompatibleLLM, parse_json_object
+from gaam_graph.llm import LocalHFChatLLM, OpenAICompatibleLLM
 from gaam_graph.lme_loader import LMERecord, LongMemEvalLoader
 from gaam_graph.memory_builder import BaselineMemoryBuilder
 from gaam_graph.raw_history import raw_history_from_lme_record
@@ -45,21 +43,155 @@ class CaseEvaluationConfig:
     session_chunk_size: int = 4
     max_chunk_chars: int = 12000
     max_previous_memory_chars: int = 12000
-    memory_model: str = os.getenv("GAAM_MEMORY_BUILDER_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
-    memory_base_url: str = os.getenv("GAAM_MEMORY_BUILDER_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-    memory_api_key: str | None = os.getenv("GAAM_MEMORY_BUILDER_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY")))
-    memory_max_new_tokens: int = int(os.getenv("GAAM_MEMORY_BUILDER_MAX_NEW_TOKENS", "2048"))
-    memory_device_map: str = os.getenv("GAAM_MEMORY_BUILDER_DEVICE_MAP", "auto")
-    memory_torch_dtype: str = os.getenv("GAAM_MEMORY_BUILDER_TORCH_DTYPE", "auto")
-    answer_model: str = os.getenv("GAAM_ANSWERER_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
-    answer_base_url: str = os.getenv("GAAM_ANSWERER_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-    answer_api_key: str | None = os.getenv("GAAM_ANSWERER_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY")))
-    answer_max_new_tokens: int = int(os.getenv("GAAM_ANSWERER_MAX_NEW_TOKENS", "1024"))
-    answer_device_map: str = os.getenv("GAAM_ANSWERER_DEVICE_MAP", "auto")
-    answer_torch_dtype: str = os.getenv("GAAM_ANSWERER_TORCH_DTYPE", "auto")
-    judge_model: str = os.getenv("GAAM_EVAL_JUDGE_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
-    judge_base_url: str = os.getenv("GAAM_EVAL_JUDGE_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-    judge_api_key: str | None = os.getenv("GAAM_EVAL_JUDGE_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY")))
+    memory_model: str | None = None
+    memory_base_url: str | None = None
+    memory_api_key: str | None = None
+    memory_max_new_tokens: int | None = None
+    memory_device_map: str | None = None
+    memory_torch_dtype: str | None = None
+    answer_model: str | None = None
+    answer_base_url: str | None = None
+    answer_api_key: str | None = None
+    answer_max_new_tokens: int | None = None
+    answer_device_map: str | None = None
+    answer_torch_dtype: str | None = None
+    judge_model: str | None = None
+    judge_base_url: str | None = None
+    judge_api_key: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "memory_model",
+            self.memory_model
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_MODEL",
+                "DEEPSEEK_MODEL",
+                default="deepseek-v4-flash",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "memory_base_url",
+            self.memory_base_url
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL",
+                default="https://api.deepseek.com",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "memory_api_key",
+            self.memory_api_key
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                default="",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "memory_max_new_tokens",
+            self.memory_max_new_tokens
+            or _env_int_first_nonempty("GAAM_MEMORY_BUILDER_MAX_NEW_TOKENS", default=2048),
+        )
+        object.__setattr__(
+            self,
+            "memory_device_map",
+            self.memory_device_map
+            or _env_first_nonempty("GAAM_MEMORY_BUILDER_DEVICE_MAP", default="auto"),
+        )
+        object.__setattr__(
+            self,
+            "memory_torch_dtype",
+            self.memory_torch_dtype
+            or _env_first_nonempty("GAAM_MEMORY_BUILDER_TORCH_DTYPE", default="auto"),
+        )
+        object.__setattr__(
+            self,
+            "answer_model",
+            self.answer_model
+            or _env_first_nonempty(
+                "GAAM_ANSWERER_MODEL",
+                "DEEPSEEK_MODEL",
+                default="deepseek-v4-flash",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "answer_base_url",
+            self.answer_base_url
+            or _env_first_nonempty(
+                "GAAM_ANSWERER_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL",
+                default="https://api.deepseek.com",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "answer_api_key",
+            self.answer_api_key
+            or _env_first_nonempty(
+                "GAAM_ANSWERER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                default="",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "answer_max_new_tokens",
+            self.answer_max_new_tokens
+            or _env_int_first_nonempty("GAAM_ANSWERER_MAX_NEW_TOKENS", default=1024),
+        )
+        object.__setattr__(
+            self,
+            "answer_device_map",
+            self.answer_device_map
+            or _env_first_nonempty("GAAM_ANSWERER_DEVICE_MAP", default="auto"),
+        )
+        object.__setattr__(
+            self,
+            "answer_torch_dtype",
+            self.answer_torch_dtype
+            or _env_first_nonempty("GAAM_ANSWERER_TORCH_DTYPE", default="auto"),
+        )
+        object.__setattr__(
+            self,
+            "judge_model",
+            self.judge_model
+            or _env_first_nonempty(
+                "GAAM_EVAL_JUDGE_MODEL",
+                "DEEPSEEK_MODEL",
+                default="deepseek-v4-flash",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "judge_base_url",
+            self.judge_base_url
+            or _env_first_nonempty(
+                "GAAM_EVAL_JUDGE_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL",
+                default="https://api.deepseek.com",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "judge_api_key",
+            self.judge_api_key
+            or _env_first_nonempty(
+                "GAAM_EVAL_JUDGE_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                default="",
+            ),
+        )
 
 
 def run_case_evaluation(config: CaseEvaluationConfig) -> dict[str, Any]:
@@ -373,36 +505,16 @@ def _judge_answer(record: LMERecord, answer_report: dict[str, Any], config: Case
         question_type=str(record.question_type or ""),
     )
     try:
-        client = OpenAI(
+        llm = OpenAICompatibleLLM(
+            model=config.judge_model,
             api_key=config.judge_api_key,
-            base_url=config.judge_base_url.rstrip("/"),
+            base_url=config.judge_base_url,
+            temperature=0.0,
         )
-        extra_body = None
-        if "deepseek" in config.judge_base_url.lower():
-            extra_body = {"thinking": {"type": "disabled"}}
-        request = {
-            "model": config.judge_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a strict LongMemEval answer judge. Return only JSON.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0,
-            "stream": False,
-            "extra_body": extra_body,
-        }
-        try:
-            response = client.chat.completions.create(
-                **request,
-                response_format={"type": "json_object"},
-            )
-            response_format_used = True
-        except Exception:
-            response = client.chat.completions.create(**request)
-            response_format_used = False
-        parsed = parse_json_object(response.choices[0].message.content or "{}")
+        parsed = llm.chat_json(
+            system="You are a strict LongMemEval answer judge. Return only JSON.",
+            user=prompt,
+        )
         score = float(parsed.get("score", 1.0 if parsed.get("is_correct") else 0.0))
         return {
             "status": "succeeded",
@@ -412,7 +524,7 @@ def _judge_answer(record: LMERecord, answer_report: dict[str, Any], config: Case
             "score": max(0.0, min(1.0, score)),
             "is_correct": bool(parsed.get("is_correct", score >= 0.7)),
             "rationale": str(parsed.get("rationale", "")),
-            "response_format_used": response_format_used,
+            "judge_client": "OpenAICompatibleLLM",
             "raw_judge": parsed,
         }
     except Exception as exc:
@@ -439,3 +551,19 @@ def _answer_judge_prompt(*, question: str, answer: str, prediction: str, questio
         f"Correct answer or rubric:\n{answer}\n\n"
         f"Model response:\n{prediction}"
     )
+
+
+def _env_first_nonempty(*names: str, default: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value)
+    return default
+
+
+def _env_int_first_nonempty(*names: str, default: int) -> int:
+    value = _env_first_nonempty(*names, default=str(default))
+    try:
+        return int(value)
+    except Exception:
+        return default

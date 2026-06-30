@@ -63,6 +63,34 @@ set +a
 bash scripts/run_production_e2e_training_and_evaluation.sh
 ```
 
+On a remote GPU server, the preferred launcher is:
+
+```bash
+bash scripts/run_remote_production_training.sh
+```
+
+It loads `production.env`, writes remote diagnostics first, and then launches
+the production E2E script. Use the lower-level E2E script directly only when you
+already sourced the environment yourself.
+
+For a fresh remote environment, install dependencies through the dedicated
+installer first:
+
+```bash
+bash scripts/install_remote_production_deps.sh
+```
+
+Or let the launcher run it once before diagnostics:
+
+```bash
+INSTALL_DEPS_BEFORE_TRAINING=1 bash scripts/run_remote_production_training.sh
+```
+
+Keep `INSTALL_DEPS_BEFORE_TRAINING=0` after the environment is prepared. The
+installer intentionally keeps `INSTALL_FLASH_ATTN=0` by default because
+flash-attn must match the active PyTorch/CUDA/C++ ABI; install it only after
+the PyTorch check in this document is clean.
+
 Do not commit `production.env`; keep real API keys in your server environment or
 secret manager.
 
@@ -497,6 +525,18 @@ python scripts/check_production_e2e_preflight.py \
 Set `REQUIRE_CUDA=0`, `CHECK_IMPORTS=0`, or `REQUIRE_VERL_IMPORT=0` only for
 local shell smoke tests; keep them enabled on the remote GPU server.
 
+For a richer remote diagnostics report before starting training, run:
+
+```bash
+python scripts/collect_remote_training_diagnostics.py \
+  --output outputs/remote_training_diagnostics.json
+```
+
+This writes Python/package versions, PyTorch CUDA details, optional `nvidia-smi`
+output, a redacted environment snapshot, and the full production preflight
+report. It is the first command to run when a remote server behaves differently
+from the local tests.
+
 At the end, the script also writes a final audit report:
 
 ```text
@@ -513,6 +553,8 @@ The E2E script also exports a compact evidence bundle by default:
 ```bash
 EXPORT_ARTIFACT_BUNDLE=1
 ARTIFACT_BUNDLE_DIR=outputs/production_artifact_bundle
+VERIFY_ARTIFACT_BUNDLE=1
+VERIFY_PRODUCTION_COMPLETION=1
 RUN_ID=remote_a6000_seed1029
 ```
 
@@ -529,6 +571,41 @@ python scripts/export_production_artifact_bundle.py \
   --split_manifest outputs/splits/longmemeval_s.existing_graphs.seed1029.json \
   --bundle_output_dir outputs/production_artifact_bundle \
   --run_id remote_a6000_seed1029
+```
+
+Verify the bundle:
+
+```bash
+python scripts/verify_production_artifact_bundle.py \
+  --bundle_output_dir outputs/production_artifact_bundle
+```
+
+The verifier writes:
+
+```text
+outputs/production_artifact_bundle/production_artifact_bundle_verification.json
+```
+
+A remote production run is not considered fully evidenced until all of these
+files report success:
+
+```text
+outputs/production_native_verl_dual_cotraining/native_verl_training_verification.json
+outputs/production_post_training_case_evaluation/case_evaluation_verification.json
+outputs/production_post_training_case_evaluation/production_run_audit.json
+outputs/production_artifact_bundle/production_artifact_bundle_verification.json
+outputs/production_post_training_case_evaluation/production_e2e_completion_verification.json
+```
+
+You can run the final completion verifier manually:
+
+```bash
+python scripts/verify_production_e2e_completion.py \
+  --training_output_dir outputs/production_native_verl_dual_cotraining \
+  --evaluation_output_dir outputs/production_post_training_case_evaluation \
+  --artifact_bundle_dir outputs/production_artifact_bundle \
+  --expected_evaluation_split test \
+  --split_manifest outputs/splits/longmemeval_s.existing_graphs.seed1029.json
 ```
 
 If you want to run training without evaluation, use the training wrapper below.

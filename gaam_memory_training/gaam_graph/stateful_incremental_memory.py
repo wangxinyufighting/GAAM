@@ -36,13 +36,65 @@ class StatefulIncrementalMemoryConfig:
     max_chunk_chars: int = 12000
     max_previous_memory_chars: int = 12000
     llm_backend: str = "api"  # api or local_hf
-    model: str = os.getenv("GAAM_MEMORY_BUILDER_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
-    api_key: str | None = os.getenv("GAAM_MEMORY_BUILDER_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY")))
-    base_url: str = os.getenv("GAAM_MEMORY_BUILDER_BASE_URL", os.getenv("DEEPSEEK_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")))
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
     temperature: float = 0.0
-    max_new_tokens: int = 2048
-    device_map: str = "auto"
-    torch_dtype: str = "auto"
+    max_new_tokens: int | None = None
+    device_map: str | None = None
+    torch_dtype: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "model",
+            self.model
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_MODEL",
+                "DEEPSEEK_MODEL",
+                default="deepseek-v4-flash",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "api_key",
+            self.api_key
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                default="",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "base_url",
+            self.base_url
+            or _env_first_nonempty(
+                "GAAM_MEMORY_BUILDER_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL",
+                default="https://api.deepseek.com",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "max_new_tokens",
+            self.max_new_tokens
+            or _env_int_first_nonempty("GAAM_MEMORY_BUILDER_MAX_NEW_TOKENS", default=2048),
+        )
+        object.__setattr__(
+            self,
+            "device_map",
+            self.device_map
+            or _env_first_nonempty("GAAM_MEMORY_BUILDER_DEVICE_MAP", default="auto"),
+        )
+        object.__setattr__(
+            self,
+            "torch_dtype",
+            self.torch_dtype
+            or _env_first_nonempty("GAAM_MEMORY_BUILDER_TORCH_DTYPE", default="auto"),
+        )
 
 
 def build_stateful_incremental_memories(config: StatefulIncrementalMemoryConfig) -> dict[str, Any]:
@@ -205,3 +257,19 @@ def _normalize_memory_response(response: dict[str, Any], record_id: str) -> dict
     response.setdefault("metadata", {})
     response["metadata"]["build_mode"] = "stateful_incremental"
     return response
+
+
+def _env_first_nonempty(*names: str, default: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value)
+    return default
+
+
+def _env_int_first_nonempty(*names: str, default: int) -> int:
+    value = _env_first_nonempty(*names, default=str(default))
+    try:
+        return int(value)
+    except Exception:
+        return default

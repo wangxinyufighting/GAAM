@@ -143,7 +143,7 @@ def _check_code_a1_root(path: Path, errors: list[str], warnings: list[str]) -> N
     verl_pkg = path / "verl" / "verl"
     if not verl_pkg.exists() or not verl_pkg.is_dir():
         errors.append(f"Code-A1 vendored VERL package is missing: {verl_pkg}")
-    main_ppo = path / "verl" / "trainer" / "main_ppo.py"
+    main_ppo = path / "verl" / "verl" / "trainer" / "main_ppo.py"
     if not main_ppo.exists():
         warnings.append(f"Could not find Code-A1 VERL trainer entrypoint: {main_ppo}")
 

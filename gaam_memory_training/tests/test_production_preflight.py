@@ -63,9 +63,8 @@ def _base_config(tmp_path: Path) -> ProductionPreflightConfig:
     _write_model_dir(memory_model)
     _write_model_dir(question_model)
     code_a1_root = tmp_path / "Code-A1"
-    (code_a1_root / "verl" / "verl").mkdir(parents=True)
-    (code_a1_root / "verl" / "trainer").mkdir(parents=True)
-    (code_a1_root / "verl" / "trainer" / "main_ppo.py").write_text("# fake", encoding="utf-8")
+    (code_a1_root / "verl" / "verl" / "trainer").mkdir(parents=True)
+    (code_a1_root / "verl" / "verl" / "trainer" / "main_ppo.py").write_text("# fake", encoding="utf-8")
     return ProductionPreflightConfig(
         input_path=input_path,
         oracle_graph_dir=graph_dir,
@@ -161,3 +160,120 @@ def test_production_preflight_cli_outputs_json(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["status"] == "succeeded"
+
+
+def test_production_preflight_cli_accepts_memory_api_key_alias(tmp_path: Path, monkeypatch):
+    config = _base_config(tmp_path)
+    monkeypatch.setenv("MEMORY_API_KEY", "memory-key")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_production_e2e_preflight.py",
+            "--input",
+            str(config.input_path),
+            "--oracle_graph_dir",
+            str(config.oracle_graph_dir),
+            "--split_manifest",
+            str(config.split_manifest),
+            "--memory_model_path",
+            str(config.memory_model_path),
+            "--question_model_path",
+            str(config.question_model_path),
+            "--code_a1_root",
+            str(config.code_a1_root),
+            "--training_output_dir",
+            str(config.training_output_dir),
+            "--eval_output_dir",
+            str(config.eval_output_dir),
+            "--memory_backend",
+            "stateful_api",
+            "--answer_backend",
+            "no_llm",
+            "--judge_backend",
+            "heuristic",
+            "--require_cuda",
+            "0",
+            "--check_imports",
+            "0",
+            "--require_verl_import",
+            "0",
+        ],
+        cwd=ROOT_DIR,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "succeeded"
+    assert report["checks"]["api_keys"]["api_key_configured"]["memory"] is True
+
+
+def test_production_preflight_cli_blank_role_keys_fall_back_to_deepseek_key(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _base_config(tmp_path)
+    monkeypatch.setenv("MEMORY_API_KEY", "")
+    monkeypatch.setenv("GAAM_MEMORY_BUILDER_API_KEY", "")
+    monkeypatch.setenv("ANSWER_API_KEY", "")
+    monkeypatch.setenv("GAAM_ANSWERER_API_KEY", "")
+    monkeypatch.setenv("JUDGE_API_KEY", "")
+    monkeypatch.setenv("GAAM_EVAL_JUDGE_API_KEY", "")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_API_KEY", "")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_ENABLED", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-fallback-key")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_production_e2e_preflight.py",
+            "--input",
+            str(config.input_path),
+            "--oracle_graph_dir",
+            str(config.oracle_graph_dir),
+            "--split_manifest",
+            str(config.split_manifest),
+            "--memory_model_path",
+            str(config.memory_model_path),
+            "--question_model_path",
+            str(config.question_model_path),
+            "--code_a1_root",
+            str(config.code_a1_root),
+            "--training_output_dir",
+            str(config.training_output_dir),
+            "--eval_output_dir",
+            str(config.eval_output_dir),
+            "--memory_backend",
+            "stateful_api",
+            "--answer_backend",
+            "api",
+            "--judge_backend",
+            "api",
+            "--require_cuda",
+            "0",
+            "--check_imports",
+            "0",
+            "--require_verl_import",
+            "0",
+        ],
+        cwd=ROOT_DIR,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "succeeded"
+    configured = report["checks"]["api_keys"]["api_key_configured"]
+    assert configured["reward_judge"] is True
+    assert configured["memory"] is True
+    assert configured["answer"] is True
+    assert configured["judge"] is True

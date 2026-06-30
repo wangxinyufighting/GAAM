@@ -1,0 +1,106 @@
+\documentclass[a4paper,11pt]{article}
+
+% 引入必要的宏包
+\usepackage[UTF8]{ctex} % 支持中文
+\usepackage{amsmath}    % 数学公式支持
+\usepackage{amssymb}    % 数学符号支持
+\usepackage{geometry}   % 页面设置
+\usepackage{enumitem}   % 列表定制
+\usepackage{xcolor}     % 颜色支持
+\usepackage{tcolorbox}  % 文本框支持
+
+% 设置页面边距
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% 自定义列表样式
+\setlist[enumerate,1]{label=\textbf{步骤 \arabic*：}, leftmargin=*}
+\setlist[itemize,1]{label=$\bullet$, leftmargin=1.5em}
+\setlist[itemize,2]{label=$\circ$, leftmargin=1.5em}
+
+\title{\textbf{非对称攻防与记忆重构：单次训练迭代标准流程}}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section*{核心数据结构前提}
+记忆库 \(M\) 中的每一条记忆不再是纯文本，而是带有索引的结构体，用于实现“血缘追踪”：
+\begin{tcolorbox}[colback=gray!10, colframe=gray!50, arc=4pt]
+\texttt{Memory\_Chunk = \{ content: "...", linked\_questions: [\(Q_a, Q_b, \dots\)] \}}
+\end{tcolorbox}
+
+\vspace{0.5cm}
+
+\section*{完整单次训练迭代流程 (One Training Step)}
+
+\subsection*{阶段一：攻击发起 (Attack Generation)}
+\begin{enumerate}
+    \item \textbf{图谱游走}：Attacker 通过 Graph Routing Policy 选定攻击路径。
+    \item \textbf{生成攻击}：Attacker 输出刁钻问题 \(Q\) 及对应的黄金语料 \(F\)。
+\end{enumerate}
+
+\subsection*{阶段二：前置校验 (Oracle Check)}
+\begin{enumerate}[resume]
+    \item \textbf{底线测试}：将 \(F\) 作为上下文直接喂给 Answer Agent，让其回答 \(Q\)。
+    \begin{itemize}
+        \item \textit{回答错误}：说明 Agent 基础理解能力不足，给再好的记忆也没用。直接丢弃此样本（\texttt{continue}），结束当前 Step。
+        \item \textit{回答正确}：问题有效，进入防御测试。
+    \end{itemize}
+\end{enumerate}
+
+\subsection*{阶段三：初始防御测试 (Initial Defense)}
+\begin{enumerate}[resume]
+    \item \textbf{旧记忆检索}：使用冻结的 Retriever 从当前记忆库 \(M_t\) 中检索 Top-K 个相关片段。
+    \item \textbf{尝试回答}：Answer Agent 仅基于检索出的旧记忆回答 \(Q\)。
+    \begin{itemize}
+        \item \textit{回答正确}：防御成功。将 \(Q\) 绑定到对应命中记忆的 \texttt{linked\_questions} 中，并加入“全局成功题库（Success Pool）”，结束当前 Step。
+        \item \textit{回答错误}：防御被击穿，触发记忆重构。
+    \end{itemize}
+\end{enumerate}
+
+\subsection*{阶段四：记忆路由与重构 (Memory Routing \& Refactoring)}
+\begin{enumerate}[resume]
+    \item \textbf{计算相似度分流}：查看检索出的 Top-K 记忆的最高相似度得分。
+    \begin{itemize}
+        \item \textbf{分支 A（全新知识，最高得分 \(< \tau\)）}：
+        \begin{itemize}
+            \item \textbf{动作 (Add)}：Policy 仅基于新语料 \(F\) 生成 1 条新 Chunk。
+            \item \textbf{测试集准备}：从全局 Success Pool 中\textbf{随机抽取} 3 道题作为回归测试集（防止全局检索分布偏移）。
+        \end{itemize}
+        \item \textbf{分支 B（知识冲突/补充，最高得分 \(\ge \tau\)）}：
+        \begin{itemize}
+            \item \textbf{动作 (Merge)}：取出得分达标的 \(m\) 条旧 Chunk，与新语料 \(F\) 组合，Policy 将其压缩成 1 条新 Chunk。
+            \item \textbf{测试集准备（精准锁定）}：提取这 \(m\) 条旧 Chunk 绑定的所有 \texttt{linked\_questions}，取并集作为\textbf{必考测试集}。
+        \end{itemize}
+    \end{itemize}
+\end{enumerate}
+
+\subsection*{阶段五：沙盒结算与 RL 更新 (Sandbox Test \& RL Update)}
+\begin{enumerate}[resume]
+    \item \textbf{沙盒环境构建}：在虚拟沙盒中执行 Add 或 Merge 动作，生成临时记忆库 \(M_{temp}\)。
+    \item \textbf{精准回归测试（考试）}：
+    \begin{itemize}
+        \item \textit{当前题测试}：从 \(M_{temp}\) 检索并回答当前新题 \(Q\)。
+        \item \textit{历史题定向测试}：用阶段四准备好的测试集，从 \(M_{temp}\) 检索并回答。
+    \end{itemize}
+    \item \textbf{计算 Reward}：综合当前题和历史题的正确率计算得分（可加入新 Chunk 的长度惩罚，鼓励精简）。
+    \item \textbf{状态提交与回滚（环境状态转换）}：
+    \begin{itemize}
+        \item \textbf{Reward \(> 0\) (Commit / 提交)}：
+        \begin{itemize}
+            \item 如果是 \textbf{Add}：新 Chunk 的关联列表初始化为 \([Q]\)。
+            \item 如果是 \textbf{Merge}：新 Chunk \textbf{继承}那 \(m\) 个旧 Chunk 的所有关联问题，并加上当前的新题，即 \texttt{linked\_questions = 旧题并集 + [\(Q\)]}。
+            \item 将 \(M_{temp}\) 正式覆盖为主记忆库 \(M_{t+1}\)，将 \(Q\) 加入全局 Success Pool。
+        \end{itemize}
+        \item \textbf{Reward \(\le 0\) (Rollback / 回滚)}：
+        \begin{itemize}
+            \item 丢弃新记忆，主记忆库保持 \(M_t\) 不变（不污染环境）。
+            \item Attacker 将 \(Q\) 放入“高优攻击库（High-Priority Buffer）”，留待未来优先抽查。
+        \end{itemize}
+    \end{itemize}
+    \item \textbf{参数更新}：使用计算出的 Reward 更新 Defender 的 Memory Refactoring Policy 网络参数。结束当前 Step，进入下一题。
+\end{enumerate}
+
+\end{document}

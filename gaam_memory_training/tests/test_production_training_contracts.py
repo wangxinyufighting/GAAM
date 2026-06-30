@@ -13,6 +13,7 @@ import pandas as pd
 
 from gaam_graph.case_evaluation import CaseEvaluationConfig, run_case_evaluation
 from gaam_graph.native_verl_grpo import NativeVerlExportConfig, export_native_verl_grpo_dataset
+from gaam_graph.stateful_incremental_memory import StatefulIncrementalMemoryConfig
 from gaam_graph.verl_gaam_reward import compute_score
 
 
@@ -196,6 +197,57 @@ def test_production_readiness_warns_when_train_batch_exceeds_available_rows(tmp_
     assert any("train_batch_size=8 is larger" in warning for warning in report["warnings"])
 
 
+def test_production_readiness_reward_judge_blank_key_falls_back_to_deepseek_key(
+    tmp_path: Path,
+    monkeypatch,
+):
+    input_path = tmp_path / "records.json"
+    graph_dir = tmp_path / "graphs"
+    split_path = tmp_path / "split.json"
+    model_dir = tmp_path / "model"
+    code_a1_root = tmp_path / "Code-A1"
+    model_dir.mkdir()
+    (code_a1_root / "verl" / "verl").mkdir(parents=True)
+    _write_minimal_case(input_path)
+    _write_minimal_oracle_graph(graph_dir)
+    _write_split_manifest(split_path, input_path, graph_dir, ["case_contract"])
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_ENABLED", "1")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-fallback-key")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_production_training_readiness.py",
+            "--input",
+            str(input_path),
+            "--oracle_graph_dir",
+            str(graph_dir),
+            "--split_manifest",
+            str(split_path),
+            "--memory_model_path",
+            str(model_dir),
+            "--question_model_path",
+            str(model_dir),
+            "--code_a1_root",
+            str(code_a1_root),
+            "--questions_per_case",
+            "3",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "succeeded"
+    assert not any("GAAM_REWARD_JUDGE_API_KEY is empty" in error for error in report["errors"])
+
+
 def test_memory_builder_export_does_not_leak_benchmark_target(tmp_path: Path):
     input_path = tmp_path / "records.json"
     graph_dir = tmp_path / "graphs"
@@ -344,6 +396,91 @@ def test_case_evaluation_can_restrict_to_test_split(tmp_path: Path):
     assert not (output_dir / "case_train" / "current_memory.json").exists()
 
 
+def test_case_evaluation_blank_deepseek_env_falls_back_to_openai_env(tmp_path: Path, monkeypatch):
+    """Evaluation config should not let blank DeepSeek values mask OpenAI-compatible fallbacks."""
+    monkeypatch.setenv("GAAM_MEMORY_BUILDER_MODEL", "")
+    monkeypatch.setenv("GAAM_MEMORY_BUILDER_BASE_URL", "")
+    monkeypatch.setenv("GAAM_MEMORY_BUILDER_API_KEY", "")
+    monkeypatch.setenv("GAAM_ANSWERER_MODEL", "")
+    monkeypatch.setenv("GAAM_ANSWERER_BASE_URL", "")
+    monkeypatch.setenv("GAAM_ANSWERER_API_KEY", "")
+    monkeypatch.setenv("GAAM_EVAL_JUDGE_MODEL", "")
+    monkeypatch.setenv("GAAM_EVAL_JUDGE_BASE_URL", "")
+    monkeypatch.setenv("GAAM_EVAL_JUDGE_API_KEY", "")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai-compatible.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "fallback-key")
+
+    config = CaseEvaluationConfig(input_path=tmp_path / "records.json", output_dir=tmp_path / "eval")
+    memory_config = StatefulIncrementalMemoryConfig(
+        input_path=tmp_path / "records.json",
+        output_dir=tmp_path / "memory",
+    )
+
+    assert config.memory_base_url == "https://openai-compatible.example/v1"
+    assert config.memory_api_key == "fallback-key"
+    assert config.answer_base_url == "https://openai-compatible.example/v1"
+    assert config.answer_api_key == "fallback-key"
+    assert config.judge_base_url == "https://openai-compatible.example/v1"
+    assert config.judge_api_key == "fallback-key"
+    assert memory_config.base_url == "https://openai-compatible.example/v1"
+    assert memory_config.api_key == "fallback-key"
+
+
+def test_case_evaluation_api_judge_uses_openai_compatible_llm_without_memory_leakage(
+    tmp_path: Path,
+    monkeypatch,
+):
+    input_path = tmp_path / "records.json"
+    output_dir = tmp_path / "case_eval_api_judge"
+    _write_minimal_case(input_path)
+    calls = []
+
+    class DummyJudgeLLM:
+        def __init__(self, **kwargs):
+            calls.append({"init": kwargs})
+
+        def chat_json(self, system: str, user: str):
+            calls.append({"system": system, "user": user})
+            assert "LongMemEval answer judge" in system
+            assert "LEAK_TARGET_QUESTION" in user
+            assert "LEAK_GOLD_RUBRIC" in user
+            return {
+                "is_correct": True,
+                "score": 1.0,
+                "rationale": "The answer matches the rubric.",
+            }
+
+    import gaam_graph.case_evaluation as case_evaluation
+
+    monkeypatch.setattr(case_evaluation, "OpenAICompatibleLLM", DummyJudgeLLM)
+
+    manifest = run_case_evaluation(
+        CaseEvaluationConfig(
+            input_path=input_path,
+            output_dir=output_dir,
+            memory_backend="baseline",
+            answer_backend="no_llm",
+            judge_backend="api",
+            judge_model="judge-model",
+            judge_base_url="https://judge.example/v1",
+            judge_api_key="judge-key",
+        )
+    )
+
+    assert manifest["status"] == "succeeded"
+    assert manifest["accuracy"] == 1.0
+    assert calls[0]["init"]["model"] == "judge-model"
+    assert calls[0]["init"]["base_url"] == "https://judge.example/v1"
+    judge_report = json.loads((output_dir / "case_contract" / "judge_report.json").read_text(encoding="utf-8"))
+    assert judge_report["judge_client"] == "OpenAICompatibleLLM"
+    memory_text = (output_dir / "case_contract" / "current_memory.json").read_text(encoding="utf-8")
+    assert "LEAK_TARGET_QUESTION" not in memory_text
+    assert "LEAK_GOLD_RUBRIC" not in memory_text
+
+
 def test_required_llm_judge_missing_key_forces_zero_reward(monkeypatch):
     monkeypatch.setenv("GAAM_REWARD_JUDGE_ENABLED", "1")
     monkeypatch.setenv("GAAM_REWARD_JUDGE_REQUIRED", "1")
@@ -481,6 +618,74 @@ def test_reward_llm_judge_uses_openai_compatible_api(monkeypatch):
     assert calls[0]["client"]["api_key"] == "test-key"
     assert calls[0]["client"]["base_url"] == "https://judge.example/v1"
     assert calls[1]["model"] == "judge-model"
+
+
+def test_reward_llm_judge_blank_env_values_do_not_mask_fallbacks(monkeypatch):
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "oracle_validity": 1.0,
+                                    "answerability": 1.0,
+                                    "diversity": 1.0,
+                                    "difficulty": 1.0,
+                                    "weakness_targeting": 1.0,
+                                    "non_redundancy": 1.0,
+                                    "leakage_safety": 1.0,
+                                    "overall": 1.0,
+                                }
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.append({"client": kwargs})
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_ENABLED", "1")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_REQUIRED", "1")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_BASE_URL", "")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_API_KEY", "")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_MODEL", "")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fallback-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+
+    details = compute_score(
+        "gaam_question_agent",
+        json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "What stable preference appears across sessions?",
+                        "type": "multi_session",
+                    }
+                ]
+            }
+        ),
+        {
+            "actor_role": "question_agent",
+            "required_terms": ["preference"],
+            "oracle_digest": "The user repeatedly expressed a stable preference.",
+            "questions_per_case": 1,
+        },
+    )
+
+    assert details["llm_judge"]["status"] == "succeeded"
+    assert details["llm_judge"]["base_url"] == "https://api.deepseek.com"
+    assert details["llm_judge"]["model"] == "deepseek-v4-flash"
+    assert calls[0]["client"]["api_key"] == "fallback-key"
 
 
 def test_case_evaluation_can_use_local_hf_answer_backend_without_api_key(

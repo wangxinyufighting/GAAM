@@ -24,7 +24,12 @@ gaam_memory_training/tests/*
 !gaam_memory_training/tests/test_production_e2e_wrapper.py
 !gaam_memory_training/tests/test_production_env_example.py
 !gaam_memory_training/tests/test_production_artifact_bundle.py
+!gaam_memory_training/tests/test_production_artifact_bundle_verifier.py
+!gaam_memory_training/tests/test_production_completion_verifier.py
 !gaam_memory_training/tests/test_production_preflight.py
+!gaam_memory_training/tests/test_remote_training_diagnostics.py
+!gaam_memory_training/tests/test_remote_production_launcher.py
+!gaam_memory_training/tests/test_remote_dependency_installer.py
 !gaam_memory_training/tests/test_production_run_audit.py
 !gaam_memory_training/tests/test_production_training_contracts.py
 !gaam_memory_training/tests/test_production_training_wrapper.py

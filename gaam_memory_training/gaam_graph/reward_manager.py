@@ -1092,23 +1092,25 @@ class RewardManager:
     def _build_llm_judge_config(self) -> dict[str, Any]:
         """Build API judge config from env without logging secrets."""
         return {
-            "base_url": os.getenv(
+            "base_url": _env_first_nonempty(
                 "GAAM_REWARD_MANAGER_JUDGE_BASE_URL",
-                os.getenv(
-                    "GAAM_REWARD_JUDGE_BASE_URL",
-                    os.getenv("DEEPSEEK_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")),
-                ),
+                "GAAM_REWARD_JUDGE_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL",
+                default="https://api.deepseek.com",
             ),
-            "api_key": os.getenv(
+            "api_key": _env_first_nonempty(
                 "GAAM_REWARD_MANAGER_JUDGE_API_KEY",
-                os.getenv(
-                    "GAAM_REWARD_JUDGE_API_KEY",
-                    os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY", "")),
-                ),
+                "GAAM_REWARD_JUDGE_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENAI_API_KEY",
+                default="",
             ),
-            "model": os.getenv(
+            "model": _env_first_nonempty(
                 "GAAM_REWARD_MANAGER_JUDGE_MODEL",
-                os.getenv("GAAM_REWARD_JUDGE_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")),
+                "GAAM_REWARD_JUDGE_MODEL",
+                "DEEPSEEK_MODEL",
+                default="deepseek-v4-flash",
             ),
             "timeout": int(os.getenv("GAAM_REWARD_MANAGER_JUDGE_TIMEOUT", os.getenv("GAAM_REWARD_JUDGE_TIMEOUT", "60"))),
         }
@@ -1205,3 +1207,12 @@ def classify_question_failure(
         failures.append(FailureType.UNSUPPORTED_ANSWER)
 
     return failures
+
+
+def _env_first_nonempty(*names: str, default: str) -> str:
+    """Read the first non-empty env value so blank .env entries do not mask fallbacks."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return value
+    return default

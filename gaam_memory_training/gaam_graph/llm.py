@@ -18,11 +18,29 @@ class LLMError(RuntimeError):
 
 @dataclass
 class OpenAICompatibleLLM:
-    model: str = os.getenv("GAAM_LLM_MODEL", os.getenv("DEEPSEEK_MODEL", os.getenv("LLM_MODEL", "deepseek-v4-flash")))
-    api_key: Optional[str] = os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY"))
-    base_url: str = os.getenv("DEEPSEEK_BASE_URL", os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com"))
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
     timeout: int = 120
     temperature: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.model = self.model or _env_first_nonempty(
+            "GAAM_LLM_MODEL",
+            "DEEPSEEK_MODEL",
+            "LLM_MODEL",
+            default="deepseek-v4-flash",
+        )
+        self.api_key = self.api_key or _env_first_nonempty(
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        )
+        self.base_url = self.base_url or _env_first_nonempty(
+            "DEEPSEEK_BASE_URL",
+            "OPENAI_BASE_URL",
+            default="https://api.deepseek.com",
+        )
 
     def chat_json(self, system: str, user: str, schema_hint: Optional[str] = None) -> Dict[str, Any]:
         if not self.api_key:
@@ -158,3 +176,12 @@ def parse_json_object(text: str) -> Dict[str, Any]:
         if not m:
             raise
         return json.loads(m.group(0))
+
+
+def _env_first_nonempty(*names: str, default: str) -> str:
+    """Read the first non-empty env value so blank .env entries do not mask fallbacks."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value)
+    return default

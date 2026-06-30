@@ -38,7 +38,15 @@ def main() -> int:
     parser.add_argument("--train_batch_size", type=int, default=None)
     parser.add_argument("--questions_per_case", type=int, default=None)
     parser.add_argument("--reward_judge_enabled", default=os.getenv("GAAM_REWARD_JUDGE_ENABLED", "0"))
-    parser.add_argument("--reward_judge_api_key", default=os.getenv("GAAM_REWARD_JUDGE_API_KEY", ""))
+    parser.add_argument(
+        "--reward_judge_api_key",
+        default=_env_first_nonempty(
+            "GAAM_REWARD_JUDGE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        ),
+    )
     parser.add_argument("--max_reported_issues", type=int, default=30)
     args = parser.parse_args()
 
@@ -171,6 +179,14 @@ def _find_forbidden_keys(obj: Any, path: str = "") -> list[str]:
 
 def _truthy(value: str) -> bool:
     return value in {"1", "true", "True", "yes", "YES"}
+
+
+def _env_first_nonempty(*names: str, default: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value)
+    return default
 
 
 if __name__ == "__main__":

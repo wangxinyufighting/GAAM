@@ -13,6 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gaam_graph.production_preflight import ProductionPreflightConfig, run_production_preflight, truthy
 
 
+def _env_first_nonempty(*names: str, default: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value)
+    return default
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Validate the full GAAM production training/evaluation environment before launch."
@@ -30,11 +38,46 @@ def main() -> int:
     parser.add_argument("--memory_backend", default=os.getenv("MEMORY_BACKEND", "stateful_local_hf"))
     parser.add_argument("--answer_backend", default=os.getenv("ANSWER_BACKEND", "api"))
     parser.add_argument("--judge_backend", default=os.getenv("JUDGE_BACKEND", "api"))
-    parser.add_argument("--memory_api_key", default=os.getenv("GAAM_MEMORY_BUILDER_API_KEY", ""))
-    parser.add_argument("--answer_api_key", default=os.getenv("ANSWER_API_KEY", os.getenv("GAAM_ANSWERER_API_KEY", "")))
-    parser.add_argument("--judge_api_key", default=os.getenv("JUDGE_API_KEY", os.getenv("GAAM_EVAL_JUDGE_API_KEY", "")))
+    parser.add_argument(
+        "--memory_api_key",
+        default=_env_first_nonempty(
+            "MEMORY_API_KEY",
+            "GAAM_MEMORY_BUILDER_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        ),
+    )
+    parser.add_argument(
+        "--answer_api_key",
+        default=_env_first_nonempty(
+            "ANSWER_API_KEY",
+            "GAAM_ANSWERER_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        ),
+    )
+    parser.add_argument(
+        "--judge_api_key",
+        default=_env_first_nonempty(
+            "JUDGE_API_KEY",
+            "GAAM_EVAL_JUDGE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        ),
+    )
     parser.add_argument("--reward_judge_enabled", default=os.getenv("GAAM_REWARD_JUDGE_ENABLED", "0"))
-    parser.add_argument("--reward_judge_api_key", default=os.getenv("GAAM_REWARD_JUDGE_API_KEY", ""))
+    parser.add_argument(
+        "--reward_judge_api_key",
+        default=_env_first_nonempty(
+            "GAAM_REWARD_JUDGE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            default="",
+        ),
+    )
     parser.add_argument("--require_cuda", default=os.getenv("REQUIRE_CUDA", "1"))
     parser.add_argument("--check_imports", default=os.getenv("CHECK_IMPORTS", "1"))
     parser.add_argument("--require_verl_import", default=os.getenv("REQUIRE_VERL_IMPORT", "1"))

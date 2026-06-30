@@ -536,6 +536,22 @@ def test_reward_manager_llm_judge_scores_question_diagnostic_value(sample_oracle
     assert "api_key_configured" in diagnostic.metadata["llm_judge"]["config"]
 
 
+def test_reward_manager_blank_specific_judge_env_falls_back_to_common_env(monkeypatch):
+    """Blank manager-specific judge env values should not mask common GAAM judge config."""
+    monkeypatch.setenv("GAAM_REWARD_MANAGER_JUDGE_BASE_URL", "")
+    monkeypatch.setenv("GAAM_REWARD_MANAGER_JUDGE_API_KEY", "")
+    monkeypatch.setenv("GAAM_REWARD_MANAGER_JUDGE_MODEL", "")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_BASE_URL", "https://judge.example/v1")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_API_KEY", "common-key")
+    monkeypatch.setenv("GAAM_REWARD_JUDGE_MODEL", "common-judge-model")
+
+    manager = RewardManager(correctness_mode="llm_judge")
+
+    assert manager._llm_judge_config["base_url"] == "https://judge.example/v1"
+    assert manager._llm_judge_config["api_key"] == "common-key"
+    assert manager._llm_judge_config["model"] == "common-judge-model"
+
+
 def test_reward_manager_coverage_gain_from_snapshots(sample_oracle_graph):
     """Test coverage gain uses before/after snapshots instead of a fixed value."""
     manager = RewardManager()
