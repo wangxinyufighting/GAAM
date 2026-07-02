@@ -15,6 +15,9 @@ import os
 import re
 from typing import Any
 
+from gaam_graph.memory_refactor_env import MemoryEnv
+from gaam_graph.memory_refactor_schema import parse_memory_patch
+
 
 FORBIDDEN_LEAKAGE_TERMS = {
     "benchmark question",
@@ -53,6 +56,9 @@ def compute_score(
     extra_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute a scalar GAAM reward for VERL native GRPO."""
+    if data_source == "adversarial_memory_refactor":
+        return _score_memory_refactor_patch(data_source, solution_str, ground_truth, extra_info)
+
     if isinstance(ground_truth, str):
         try:
             ground_truth = json.loads(ground_truth)
@@ -80,6 +86,102 @@ def compute_score(
     details["score"] = float(max(0.0, min(1.0, details.get("score", 0.0))))
     details["data_source"] = data_source
     return details
+
+
+def _score_memory_refactor_patch(
+    data_source: str,
+    solution_str: str,
+    ground_truth: Any,
+    extra_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Score a MemoryPatch JSON string in a side-effect-free sandbox."""
+    if isinstance(ground_truth, str):
+        try:
+            ground_truth = json.loads(ground_truth)
+        except Exception:
+            ground_truth = {}
+    if not isinstance(ground_truth, dict):
+        ground_truth = {}
+    extra_info = extra_info or {}
+
+    try:
+        patch = parse_memory_patch(solution_str)
+    except ValueError as exc:
+        message = str(exc)
+        return {
+            "score": -3.0 if "invalid MemoryPatch JSON" in message else -2.0,
+            "data_source": data_source,
+            "valid_json": "invalid MemoryPatch JSON" not in message,
+            "schema_pass": False,
+            "hard_failure": message,
+        }
+
+    snapshot_id = (
+        extra_info.get("memory_snapshot_id")
+        or ground_truth.get("memory_snapshot_id")
+        or extra_info.get("snapshot_id")
+    )
+    if not snapshot_id:
+        return {
+            "score": -2.0,
+            "data_source": data_source,
+            "valid_json": True,
+            "schema_pass": False,
+            "hard_failure": "missing memory_snapshot_id",
+        }
+
+    try:
+        env = MemoryEnv.load_snapshot(str(snapshot_id))
+        result = env.evaluate_patch(
+            patch=patch,
+            question=str(ground_truth.get("question") or extra_info.get("question") or ""),
+            gold_answer=str(ground_truth.get("gold_answer") or extra_info.get("gold_answer") or ""),
+            gold_evidence=str(
+                ground_truth.get("gold_evidence") or extra_info.get("gold_evidence") or ""
+            ),
+            local_test_ids=_as_list(extra_info.get("local_test_ids")),
+            near_test_ids=_as_list(extra_info.get("near_test_ids")),
+            anchor_test_ids=_as_list(extra_info.get("anchor_test_ids")),
+        )
+    except Exception as exc:
+        return {
+            "score": -2.0,
+            "data_source": data_source,
+            "valid_json": True,
+            "schema_pass": False,
+            "hard_failure": f"sandbox evaluation failed: {exc}",
+        }
+
+    return {
+        "score": float(result.reward),
+        "data_source": data_source,
+        "valid_json": result.valid_json,
+        "schema_pass": result.schema_pass,
+        "current_correct": result.current_correct,
+        "current_evidence_supported": result.current_evidence_supported,
+        "local_pass_rate": result.local_pass_rate,
+        "near_pass_rate": result.near_pass_rate,
+        "anchor_pass_rate": result.anchor_pass_rate,
+        "retrieval_precision": result.retrieval_precision,
+        "retrieval_recall": result.retrieval_recall,
+        "conflict_count": result.conflict_count,
+        "unsupported_fact_count": result.unsupported_fact_count,
+        "redundancy_count": result.redundancy_count,
+        "over_compression_flag": result.over_compression_flag,
+        "memory_growth": result.memory_growth,
+        "commit_allowed": result.commit_allowed,
+        "diagnostics": result.diagnostics,
+    }
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
 
 
 def _score_memory_builder(solution: str, ground_truth: dict[str, Any]) -> dict[str, Any]:

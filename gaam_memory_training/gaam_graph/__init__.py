@@ -54,6 +54,43 @@ from gaam_graph.grpo_trainer import (
 
 from gaam_graph.policy_factory import build_policy_client
 
+from gaam_graph.memory_refactor_schema import (
+    MemoryRefactorAction,
+    MemoryChunkStatus,
+    QuestionEdgeRole,
+    AtomicFact,
+    ValidityScope,
+    MemoryProvenance,
+    QuestionEdge,
+    MemoryChunk,
+    MemoryChunkUpdate,
+    QuestionEdgeUpdate,
+    MemoryPatch,
+    PatchEvalResult,
+    CommitGateConfig,
+    WeightedRewardConfig,
+    parse_memory_patch,
+)
+
+from gaam_graph.memory_refactor_env import (
+    MemoryEnv,
+    CommitCandidate,
+    CommitDecision,
+    CommitManager,
+    compute_weighted_reward,
+    commit_gate_allows,
+)
+
+from gaam_graph.memory_refactor_dataset import (
+    build_refactor_policy_prompt,
+    build_verl_refactor_row,
+)
+
+from gaam_graph.memory_refactor_training import (
+    MemoryRefactorExportConfig,
+    export_memory_refactor_grpo_dataset,
+)
+
 # Phase 2 Milestone 5: Code-A1/verl alignment
 from gaam_graph.code_a1_alignment import (
     CodeA1Role,

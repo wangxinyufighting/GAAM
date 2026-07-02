@@ -33,3 +33,5 @@ gaam_memory_training/tests/*
 !gaam_memory_training/tests/test_production_run_audit.py
 !gaam_memory_training/tests/test_production_training_contracts.py
 !gaam_memory_training/tests/test_production_training_wrapper.py
+!gaam_memory_training/tests/test_memory_refactor_policy.py
+!gaam_memory_training/tests/test_memory_refactor_training_export.py
